@@ -6,8 +6,8 @@ import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { dirname } from 'node:path'
 import { z } from 'zod'
-import { key, liveTicket, type Ticket } from '../core/index.ts'
-import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
+import { key, liveTicket, type Hold, type Ticket } from '../core/index.ts'
+import { holdInstructions, mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
 import type { Effects } from './effects.ts'
@@ -60,6 +60,25 @@ declare module '@deepseek-ai/cordis' {
  */
 const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search',
   'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent']
+/**
+ * Shell commands that record or send a ticket's work: git commits, pushes and history rewrites, and GitHub or Feishu writes.
+ * A hold refuses them by name, as blocked commands are refused: a default for a worker that follows its prompt, not a boundary.
+ */
+const OUTWARD = new RegExp([
+  String.raw`\bgit(?:\s+-[Cc]\s+\S+)*\s+(?:commit|push|merge|rebase|cherry-pick|am|tag)\b`,
+  String.raw`\bgh\s+(?:pr|issue|release|repo|label)\s+(?:create|merge|close|comment|edit|review|reopen|delete|ready|lock)\b`,
+  String.raw`\bgh\s+api\b[^|;&\n]*(?:\s(?:-X|--method)\s*(?:POST|PATCH|PUT|DELETE)\b|\s-[fF]\s|\s--(?:raw-)?field\b|\s--input\b)`,
+  String.raw`\blark-cli\b[^|;&\n]*\+messages-(?:send|reply|update|recall|delete)\b`,
+].join('|'))
+/** Whether a tool call changes a ticket's files or acts outside its directory, which a hold forbids its worker (see `workOnly`). */
+function changes({ name, arguments: input }: { name: string; arguments: unknown }): boolean {
+  if (name === 'write' || name === 'edit') return true
+  const command = (input as { command?: unknown } | undefined)?.command
+  return (name === 'bash' || name === 'pwsh') && typeof command === 'string' && OUTWARD.test(command)
+}
+/** What a held ticket's worker is told when it would change or send something. */
+const heldText = (hold: Hold): string => `This ticket is on hold (${hold.reason}): until a person lifts it, do not change files, commit, `
+  + 'push or post; read, answer and report progress instead.'
 /** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
 const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
   + 'end the turn instead of waiting for them.'
@@ -95,6 +114,8 @@ export class Sessions {
   /** Decorated agents mapped to their registered disposers and skill scope until the agent is disposed or `Sessions.dispose()` runs. */
   private readonly bindings = new Map<Agent, SessionBinding>()
   private readonly retryHealth = new RetryHealth()
+  /** Who wrote the latest message each Session took in, a person (`person`) or not, and when, which a hold's guard reads. */
+  private readonly speakers = new Map<string, { person: boolean; time: number }>()
   private readonly ctx: Context
   /** Registers ordered `relay` and `notice` effect handlers that deliver to the main Session. */
   constructor(private readonly host: SessionsHost) {
@@ -108,10 +129,12 @@ export class Sessions {
   install(): void {
     const ctx = this.ctx
     ctx.on('agent/disposed', ({ agent }) => {
-      this.release(agent)
+      this.release(agent); this.speakers.delete(agent.id)
       this.retryHealth.clear(agent.id); this.updateModelHealth()
     })
     ctx.on('session/event', (session, event) => {
+      // A message typed into the Session by a person has the `user` source, as DSH's own activity tracking reads it.
+      if (event.type === 'user/message') this.speakers.set(session.id, { person: event.data.source.kind === 'user', time: event.time })
       const agent = ctx.agents.get(session.id)
       const binding = agent && agent.session === session ? this.bindings.get(agent) : undefined
       if (!agent || !binding || binding.subagent) return
@@ -245,7 +268,7 @@ export class Sessions {
       const version = this.promptFor(agent, context.signal !== undefined)
       const current = ticket && host.store.tickets.get(ticket.id)
       const composed = host.prompts.compose(version.config, master ? 'orchestrator' : 'worker', current ? host.environment(current) : undefined)
-      return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate) : ''}`
+      return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate) + holdInstructions(current) : ''}`
     }, ...(master ? { complete: true } : {}) }))
     // A recreated skill scope (e.g. after the skills service restarts) starts empty, so reset `binding.skills` before rebinding.
     const skillScope = agent.ctx.inject(['skills'], scope => {
@@ -264,7 +287,7 @@ export class Sessions {
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
     } else {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
-      binding.disposers.push(...this.workOnly(agent, ticket!.id))
+      binding.disposers.push(...this.workOnly(agent, ticket!.id, true))
     }
   }
   /**
@@ -283,16 +306,21 @@ export class Sessions {
   /**
    * An Executor Session's tools: only the profile's work tools, which DSH requires to be known, and none once its ticket
    * ended. A failed or blocked worker keeps its tools, so a person may continue it in its Session; only automated input waits
-   * (see the executor). Read inherited tools through the parent scope, which includes the preset's tools. The global view
-   * misses preset tools; the agent's own view also includes local tools such as subagent, which restrict refuses to name.
+   * (see the executor). While a person holds the ticket, it changes no file and runs no command that records or sends its
+   * work (`changes`), unless a person typed the latest message into this Session after the hold began, `personal` for a
+   * worker's own Session but never for its subagents'. Read inherited tools through the parent scope, which includes the
+   * preset's tools. The global view misses preset tools; the agent's own view also includes local tools such as subagent,
+   * which restrict refuses to name.
    */
-  private workOnly(agent: Agent, ticketId: string): (() => void)[] {
+  private workOnly(agent: Agent, ticketId: string, personal: boolean): (() => void)[] {
     const store = this.host.store
     const parent = scopeParentOf(agent)
     const allow = WORK_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
-    return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
+    const driven = (since: string) => { const speaker = this.speakers.get(agent.id); return personal && !!speaker?.person && speaker.time >= Date.parse(since) }
+    return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(execution => {
       const current = store.tickets.get(ticketId)
-      return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket' : undefined
+      if (!current || !liveTicket(current)) return 'Ticket ended; new work needs a new authorized ticket'
+      return current.hold && changes(execution) && !driven(current.hold.at) ? heldText(current.hold) : undefined
     })]
   }
   /**
@@ -308,7 +336,7 @@ export class Sessions {
     }
     const ticketId = parent === undefined ? undefined : ticketOfSession(parent)
     if (ticketId === undefined || !this.host.store.tickets.get(ticketId)) return
-    this.bindings.set(agent, { disposers: this.workOnly(agent, ticketId), subagent: true })
+    this.bindings.set(agent, { disposers: this.workOnly(agent, ticketId, false), subagent: true })
   }
   /** Register the skills of a prompt version in the agent's skill scope, in place of an earlier version's. */
   private bindSkills(binding: SessionBinding, version: PromptVersion): void {

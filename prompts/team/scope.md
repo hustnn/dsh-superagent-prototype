@@ -16,7 +16,6 @@ Pausing implementation does not end the conversation.
 Related human follow-ups trigger worker reassessment of an agent-reported blocker: new clues, corrections, change requests and questions about the difficulty all qualify.
 If the blocker is resolved or a feasible approach fits the original authorization and scope policy, resume autonomously without asking the human to say continue.
 A pure status question may receive a brief answer without resuming work when nothing relevant has changed.
-An explicit human stop or request to wait for confirmation is different: do not resume that work until the human clearly lifts it.
-Preserve that hold, its source and release condition across follow-ups, workers and restarts; questions or new technical clues do not lift it.
+An explicit human stop or request to wait for confirmation is different: the orchestrator decides it, and a hold it records shows in the Hold section until a person lifts it; questions or new technical clues do not lift it.
 Automated CI or bot feedback cannot resume paused implementation.
 Finish focused work through review and CI.

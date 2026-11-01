@@ -356,6 +356,89 @@ describe('resume and stop', () => {
     expect(h.executor.stop).toHaveBeenCalledOnce()
   })
 })
+describe('hold and release', () => {
+  const ci = (id: string) => trigger(id, { human: false, actor: { source: 'chat', id: 'ci' } })
+  it('holds a ticket on a listed person\'s follow-up: automatic Inputs wait, a person\'s still reach its worker, until a release', () => {
+    const events: string[] = []
+    const h = harness({}, { emit: event => { events.push(event.type) } })
+    const ticketId = accepted(h).ticketId!
+    h.engine.receive(trigger('2', { text: 'wait for product' })); h.settle()
+    expect(h.engine.decide('2', { kind: 'hold', ticketId, reason: 'wait for product', acknowledgement: 'Waiting until you say go.' }))
+      .toMatchObject({ kind: 'hold', ticketId, triggerIds: ['2'] })
+    const ticket = () => h.repo.tickets.get(ticketId)!
+    expect(ticket().hold).toMatchObject({ by: 'person', reason: 'wait for product', triggerId: '2' })
+    expect(ticketStage(ticket())).toEqual({ stage: 'person', action: 'hold' })
+    expect(h.outbox.find(message => message.id === key('ack', '2'))).toMatchObject({ text: 'Waiting until you say go.', ticketId })
+    expect(events).toContain('ticket.held')
+    // CI waits; a person's question still reaches the worker, which may answer it.
+    h.engine.receive(ci('3')); h.engine.receive(trigger('4', { text: 'why?' })); h.settle()
+    const delivered = (id: string) => h.delivered.some(([to, input]) => to === ticketId && input === key('input', ticketId, 'trigger', id))
+    expect([delivered('3'), delivered('4')]).toEqual([false, true])
+    // A second hold keeps the first.
+    h.tick(1); h.engine.receive(trigger('5')); h.settle()
+    h.engine.decide('5', { kind: 'hold', ticketId, reason: 'still waiting' })
+    expect(ticket().hold).toMatchObject({ triggerId: '2', reason: 'wait for product' })
+    h.tick(1); h.engine.receive(trigger('6', { text: 'go on' })); h.settle()
+    expect(h.engine.decide('6', { kind: 'release', ticketId, reason: 'go on' })).toMatchObject({ kind: 'release', ticketId })
+    expect(ticket().hold).toBeUndefined()
+    const released = ticket().inputs.at(-1)!
+    expect(released).toMatchObject({ kind: 'released', by: 'person', triggerId: '6' })
+    expect(events).toContain('ticket.released')
+    h.settle()
+    expect(h.delivered).toContainEqual([ticketId, released.id])
+    h.engine.receive(ci('7')); h.settle()
+    expect(delivered('7')).toBe(true)
+  })
+  it('records a hold or a release that a guest asks, that names an unknown or ended ticket, or that lifts no hold, as ignored', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.receive(trigger('2', { actor: guest })); h.settle()
+    expect(h.engine.decide('2', { kind: 'hold', ticketId, reason: 'x' })).toMatchObject({ kind: 'ignore', strength: 'inferred',
+      reason: [{ code: 'holdNotExplicit' }] })
+    h.engine.receive(trigger('3')); h.settle()
+    expect(h.engine.decide('3', { kind: 'release', ticketId, reason: 'x' })).toMatchObject({ kind: 'ignore', reason: [{ code: 'notHeld' }] })
+    expect(h.engine.decide('3', { kind: 'hold', ticketId: 'unknown', reason: 'x' })).toMatchObject({ kind: 'ignore', reason: [{ code: 'holdUnknown' }] })
+    expect(h.repo.tickets.get(ticketId)!.hold).toBeUndefined()
+    // A follow-up stays its worker's: the main Session may stop, hold or release on it, but not accept it.
+    expect(() => h.engine.decide('3', { kind: 'accept', title: 'Y', scope: 'small', reason: 'r' })).toThrow(new UserError('workerDecides', { tickets: ticketId }))
+  })
+  it('lets a held ticket\'s worker answer and report progress, but not report ready, acknowledge new work or deliver a result', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.receive(trigger('2')); h.settle()
+    h.engine.decide('2', { kind: 'hold', ticketId, reason: 'wait' })
+    const held = new UserError('ticketHeld', { reason: 'wait' })
+    expect(() => h.engine.report(ticketId, { state: 'ready', summary: 'done' })).toThrow(held)
+    expect(() => h.engine.reply({ purpose: 'acknowledgement', ticketId, triggerId: '2', text: 'On it' })).toThrow(held)
+    expect(h.engine.report(ticketId, { state: 'progress', summary: 'waiting', question: 'Which design?' }).attention).toMatchObject({ question: 'Which design?' })
+    expect(() => h.engine.reply({ purpose: 'result', ticketId, text: 'Done' })).toThrow()
+    h.tick(1); h.engine.receive(trigger('3')); h.settle()
+    h.engine.decide('3', { kind: 'release', ticketId, reason: 'go' })
+    expect(h.engine.report(ticketId, { state: 'ready', summary: 'done' }).ended).toMatchObject({ outcome: 'completed' })
+  })
+  it('clears the hold when the ticket ends, and does not send the message that placed it to Eval again', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.receive(trigger('2')); h.settle()
+    h.engine.decide('2', { kind: 'hold', ticketId, reason: 'wait' })
+    h.engine.report(ticketId, { state: 'dropped', summary: 'not needed after all' })
+    expect(h.repo.tickets.get(ticketId)).toMatchObject({ ended: expect.objectContaining({ outcome: 'dropped' }) })
+    expect(h.repo.tickets.get(ticketId)!.hold).toBeUndefined()
+    expect(h.repo.threads.get('chat:t1')!.pending).toEqual([])
+  })
+  it('holds and releases a ticket from the panel, and refuses a release of one that is not held', () => {
+    const events: { type: string; data: Record<string, unknown> }[] = []
+    const h = harness({}, { emit: event => { events.push(event) } })
+    const ticketId = accepted(h).ticketId!
+    expect(() => h.engine.releaseTicket(ticketId)).toThrow(new UserError('notHeld'))
+    expect(h.engine.holdTicket(ticketId).hold).toMatchObject({ by: 'panel', reason: 'Human asked to wait' })
+    expect(h.engine.releaseTicket(ticketId).hold).toBeUndefined()
+    expect(events.filter(event => event.type.startsWith('ticket.held') || event.type === 'ticket.released').map(event => [event.type, event.data.by]))
+      .toEqual([['ticket.held', 'panel'], ['ticket.released', 'panel']])
+    h.engine.stopTicket(ticketId)
+    expect(() => h.engine.holdTicket(ticketId)).toThrow(new UserError('ticketEnded'))
+  })
+})
 describe('follow-ups', () => {
   it('takes a follow-up an older version queued out of the queue without a Decision, and keeps one sent to Eval again', () => {
     const h = harness()

@@ -109,6 +109,7 @@ export type TriggerView = ReturnType<typeof triggerView>
 /** Single-line summary of why a ticket in the `person` stage is waiting on human action (omitted once answered and back with the Executor). */
 function ticketNote(ticket: Ticket, stage: TicketStage): { text: string; error: boolean } | undefined {
   if (stage.stage !== 'person') return undefined
+  if (stage.action === 'hold' && ticket.hold) return { text: preview(ticket.hold.reason), error: false }
   if (stage.action === 'answer' && ticket.attention) return { text: preview(ticket.attention.question), error: false }
   if (stage.action === 'delivery' && ticket.delivery) return { text: preview(ticket.delivery.error), error: true }
   const summary = latestReport(ticket)?.summary
@@ -120,7 +121,8 @@ export function ticketSummary(ticket: Ticket) {
   const note = ticketNote(ticket, stage)
   const state = liveTicket(ticket) ? 'open' as const : 'ended' as const
   return { id: ticket.id, title: ticket.title, state, ...stage, ...note ? { note } : {},
-    actions: { retry: canRetry(ticket), stop: liveTicket(ticket) }, strength: ticket.mandate.strength, ended: ticket.ended,
+    actions: { retry: canRetry(ticket), stop: liveTicket(ticket), hold: liveTicket(ticket) && !ticket.hold, release: liveTicket(ticket) && !!ticket.hold },
+    strength: ticket.mandate.strength, ended: ticket.ended,
     attention: ticket.attention && { ...ticket.attention, question: markdown(ticket.attention.question) },
       assignments: ticket.assignments.length, inputs: ticket.inputs.length, undelivered: ticket.undelivered.length,
     // Every started Assignment of a Ticket runs in its one shared worker Session.

@@ -2,8 +2,8 @@
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey, waitsForPerson } from './model.ts'
-import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
-  Trigger, TriggerDisposition } from './model.ts'
+import type { Assignment, ChannelRef, Evaluation, Follow, Hold, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput,
+  TicketOutcome, Trigger, TriggerDisposition } from './model.ts'
 import type { AssessmentOutcome } from './ports.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
@@ -22,7 +22,8 @@ const STATUS_REQUEST = 'Report the current ticket status with orchestrator_repor
 
 /**
  * Manages each ticket's lifecycle: creates the ticket for an accept decision with its Mandate, Subscriptions, and first
- * Assignment, binds and attaches Threads, adds Inputs, resumes, retries, restarts, and ends tickets, and drops Subscriptions.
+ * Assignment, binds and attaches Threads, adds Inputs, holds and releases, resumes, retries, restarts, and ends tickets, and
+ * drops Subscriptions.
  * Coordinates with Replies for the acknowledgement an accept carries and with Executor to start, deliver to, and stop assignments.
  * Intake, Evals, Assignments, and Engine delegate ticket and subscription mutations here.
  */
@@ -50,7 +51,7 @@ export class Tickets extends EnginePart {
     const assignment = this.newAssignment(ticket)
     this.repo.tickets.save(ticket)
     for (const triggerId of triggerIds) for (const ref of this.repo.triggers.get(triggerId)?.threads ?? []) this.subscribe(id, ref)
-    if (outcome.acknowledgement && primary) this.replies.acknowledgeAccepted(id, primary, outcome.acknowledgement)
+    if (outcome.acknowledgement && primary) this.replies.acknowledgeDecided(id, primary, outcome.acknowledgement)
     this.options.executor.start(this.require(id), assignment)
     this.emit('ticket.created', { ticketId: id, decisionId, strength: mandate.strength })
   }
@@ -141,6 +142,41 @@ export class Tickets extends EnginePart {
     }
     // The worker has the message already, so the note comes with it again.
     else if (note) this.addInput(ticket, input(key('input', ticketId, 'trigger', trigger.id, 'note', note)))
+  }
+  /**
+   * Put an open ticket on hold for a person: until a person lifts it (see `release`), the automatic Inputs wait, and its
+   * worker reads and answers but may not report ready, acknowledge new work or deliver a result. A ticket keeps the hold it
+   * has; the acknowledgement, if any, tells the person whose message placed this one that it took effect.
+   * @throws UserError when the ticket is unknown or has ended.
+   */
+  hold(ticketId: string, hold: Omit<Hold, 'id' | 'at'>, acknowledgement?: string): Ticket {
+    const ticket = this.require(ticketId)
+    if (!liveTicket(ticket)) throw new UserError('ticketEnded')
+    const at = this.now()
+    if (!ticket.hold) {
+      ticket.hold = { id: key('hold', ticketId, at), ...hold, at }; ticket.updatedAt = at
+      this.repo.tickets.save(ticket)
+      this.emit('ticket.held', { ticketId, by: hold.by })
+    }
+    const trigger = hold.triggerId ? this.repo.triggers.get(hold.triggerId) : undefined
+    if (trigger && acknowledgement) this.replies.acknowledgeDecided(ticketId, trigger, acknowledgement)
+    return this.require(ticketId)
+  }
+  /**
+   * Lift an open ticket's hold for a person, by the message `triggerId` or in the panel: the automatic Inputs that come next
+   * reach its worker again, and a `released` Input tells it to look at what changed meanwhile and go on.
+   * @throws UserError when the ticket is unknown, has ended, or is not on hold.
+   */
+  release(ticketId: string, by: Hold['by'], triggerId?: string): Ticket {
+    const ticket = this.require(ticketId)
+    if (!liveTicket(ticket)) throw new UserError('ticketEnded')
+    const hold = ticket.hold
+    if (!hold) throw new UserError('notHeld')
+    delete ticket.hold
+    this.addInput(ticket, { id: key('input', ticketId, 'released', hold.id), kind: 'released', holdId: hold.id, by, ...triggerId ? { triggerId } : {},
+      at: this.now() })
+    this.emit('ticket.released', { ticketId, by })
+    return this.require(ticketId)
   }
   /**
    * Ask a running worker whose latest report is `waiting` for a status report; leaves any other ticket alone.
@@ -234,8 +270,8 @@ export class Tickets extends EnginePart {
   addInput(ticket: Ticket, input: TicketInput): void {
     if (ticket.inputs.some(existing => existing.id === input.id)) return
     ticket.inputs.push(input); ticket.updatedAt = this.now()
-    // Hold back automated inputs while the worker is waiting on a person.
-    const held = liveTicket(ticket) && automatic(input) && waitsForPerson(ticket)
+    // Hold back automated inputs while the worker is waiting on a person, or a person put the ticket on hold.
+    const held = liveTicket(ticket) && automatic(input) && (waitsForPerson(ticket) || !!ticket.hold)
     if (!held) ticket.undelivered.push(input.id)
     this.repo.tickets.save(ticket)
     if (!liveTicket(ticket) || held) return
@@ -353,7 +389,7 @@ export class Tickets extends EnginePart {
       && (!readBefore(input, until) || ticket.undelivered.includes(input.id)) ? [input.id] : []))
     // An end dated earlier, such as a PR's merge, does not move the ticket's last change back.
     ticket.ended = { at, by, outcome, ...why }; ticket.undelivered = []; ticket.updatedAt = this.now()
-    delete ticket.attention; delete ticket.delivery
+    delete ticket.attention; delete ticket.delivery; delete ticket.hold
     // The Assignments the end stops end with it; the ticket's end says why.
     for (const assignment of stopping) { assignment.state = 'ended'; assignment.endedAt = at }
     this.repo.tickets.save(ticket)

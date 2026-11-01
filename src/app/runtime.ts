@@ -140,10 +140,12 @@ export class Runtime extends Service implements SourceHost {
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
           if (notice) sessions.notify(...notice)
           // A person's message that reached an open ticket is the ticket's; the main Session hears of it in the same transaction,
-          // and of one for an ended ticket once it resumes, unless it routed the message there itself.
+          // and of one for an ended ticket once it resumes, unless it routed the message there itself. Only one whose words may
+          // ask to stop, hold or release wakes it; the ticket's worker, which decides the others, escalates any it finds asks that.
           const followed = !this.quiet && (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
           const followup = followed ? followupNotice(store, sources, event.data.triggerId) : undefined
-          if (followup) sessions.relay(followup.id, followup.text)
+          if (followup?.wake) sessions.relay(followup.id, followup.text)
+          else if (followup) sessions.notify(followup.id, followup.value, followup.summary)
           // Notify the ticket's conversations whenever it ends via a pull request.
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
           if (ended && setup.configured()) {

@@ -4,7 +4,7 @@ import { UserError } from './errors.ts'
 import { liveTicket, threadKey } from './model.ts'
 import type { Decision, DecisionKind, Evaluation, Mandate, MandateBasis, Strength, Thread, Trigger } from './model.ts'
 import type { AssessmentOutcome, Candidate, Policy } from './ports.ts'
-import { said, type Reason } from './reasons.ts'
+import { reasonText, said, type Reason } from './reasons.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Tickets } from './tickets.ts'
 
@@ -21,7 +21,8 @@ const REQUEUES = 2
 /**
  * Evals runs the Evals of Threads: it batches a Thread's queued Triggers into one Eval, takes its strength, actor, and basis
  * from the gate, asks the assessor, keeps its deadline through a pause, and records the Decision it ends with: accept, stop,
- * ignore, or unavailable. It depends on Tickets to create the ticket an accept decides and to end the one a stop names; the
+ * hold, release, ignore, or unavailable. It depends on Tickets to create the ticket an accept decides, to end the one a stop
+ * names and to hold or release the one a hold or a release names; the
  * Engine routes the main Session's decisions, people's replays, worker handbacks, and the pass's Eval work here.
  */
 export class Evals extends EnginePart {
@@ -125,8 +126,8 @@ export class Evals extends EnginePart {
   /**
    * Decide a Trigger: the Eval that holds it, or a direct Eval of it alone when none does.
    * @throws UserError when the Trigger is unknown or not admissible, `outcome.evalId` names an Eval that has finished, a
-   * ticket's worker still decides the Trigger and the outcome is not a stop, or an inferred candidate is accepted outside `auto`
-   * mode or without enabled matching rules.
+   * ticket's worker still decides the Trigger and the outcome is not a stop, a hold or a release, or an inferred candidate
+   * is accepted outside `auto` mode or without enabled matching rules.
    */
   decide(triggerId: string, outcome: Outcome): Decision {
     const trigger = this.repo.triggers.get(triggerId)
@@ -144,10 +145,11 @@ export class Evals extends EnginePart {
       }
       return earlier
     }
-    // A follow-up that reached a ticket is its worker's to judge: the main Session may only stop the work on it.
-    if (outcome.kind !== 'stop') this.leftToWorkers(trigger)
+    // A follow-up that reached a ticket is its worker's to judge: the main Session may only stop, hold or release the work on it.
+    const ticketId = 'ticketId' in outcome ? outcome.ticketId : undefined
+    if (ticketId === undefined) this.leftToWorkers(trigger)
     const thread = held ?? this.thread(trigger.threads[0]!)
-    const evaluation = held?.evaluating ?? this.directEval(thread, trigger, outcome.kind, outcome.kind === 'stop' ? outcome.ticketId : undefined)
+    const evaluation = held?.evaluating ?? this.directEval(thread, trigger, outcome.kind, ticketId)
     // An inferred candidate is accepted only on enabled rules its assessment matched, while assessments may accept.
     if (outcome.kind === 'accept' && evaluation.strength !== 'explicit' && !this.policy().admitsInferred(outcome.rules ?? [])) {
       throw new UserError('notExplicit')
@@ -300,7 +302,26 @@ export class Evals extends EnginePart {
       this.tickets.end(ticket.id, 'human', 'stopped', this.now(), typeof outcome.reason === 'string' ? outcome.reason : undefined)
       return decision
     }
+    if (outcome.kind === 'hold' || outcome.kind === 'release') return this.control(thread, evaluation, outcome, audit)
     return this.accept(thread, evaluation, outcome)
+  }
+  /**
+   * Hold a live ticket, or lift its hold, on a person's explicit message, as a stop does: one that names an unknown or ended
+   * ticket, a release of a ticket that is not on hold, and an inferred message are recorded as ignored.
+   */
+  private control(thread: Thread, evaluation: Evaluation, outcome: Extract<AssessmentOutcome, { kind: 'hold' | 'release' }>,
+    audit: { audit?: Record<string, unknown> }): Decision {
+    const ticket = this.repo.tickets.get(outcome.ticketId)
+    const refuse = (code: string) => this.finish(thread, evaluation, { kind: 'ignore', reason: [{ code }], ...audit })
+    if (!ticket || !liveTicket(ticket)) return refuse('holdUnknown')
+    if (evaluation.strength !== 'explicit') return refuse('holdNotExplicit')
+    if (outcome.kind === 'release' && !ticket.hold) return refuse('notHeld')
+    const decision = this.finish(thread, evaluation, { kind: outcome.kind, reason: reasonOf(outcome.reason), ticketId: ticket.id, ...audit })
+    const triggerId = evaluation.primary ?? evaluation.triggerIds[0]!
+    if (outcome.kind === 'release') this.tickets.release(ticket.id, 'person', triggerId)
+    else this.tickets.hold(ticket.id, { by: 'person', reason: typeof outcome.reason === 'string' ? outcome.reason : reasonText(outcome.reason),
+      triggerId }, outcome.acknowledgement)
+    return decision
   }
   /** Record an accept with the Mandate the Eval gives, and have Tickets create its ticket. */
   private accept(thread: Thread, evaluation: Evaluation, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Decision {
