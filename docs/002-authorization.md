@@ -145,7 +145,7 @@ If revalidation fails, the Ticket stays ended and takes none of its waiting mess
 
 ### Hold and release
 
-A person who asks a live Ticket to wait, such as for a product decision, puts it on hold; one who says to go on lifts the hold. Both are ordinary Triggers that Eval decides, as a stop is: the gate must give the message explicit strength, so a guest's message, an unknown or ended Ticket, and a release of a Ticket that is not on hold are recorded as `ignore` with `holdNotExplicit`, `holdUnknown` or `notHeld`. The panel holds and releases directly, as it stops. An Executor cannot place or lift a hold: it escalates a message it reads as asking to stop, wait or go on.
+A person who asks a live Ticket to wait, such as for a product decision, puts it on hold; one who says to go on lifts the hold. Both are ordinary Triggers that Eval decides, as a stop is: the gate must give the message explicit strength, so a guest's message, an unknown or ended Ticket, and a release of a Ticket that is not on hold are recorded as `ignore` with `holdNotExplicit`, `holdUnknown` or `notHeld`. The panel holds and releases directly, as it stops. An Executor cannot lift a hold: it escalates a message it reads as asking to stop, wait, take the work over or go on, and only a person's message, through Eval, or the panel lifts one.
 
 A hold changes no Mandate and ends nothing. While it lasts:
 
@@ -154,6 +154,11 @@ A hold changes no Mandate and ends nothing. While it lasts:
 - the Executor's prompt carries a Hold section on every model request, so compaction and restarts keep it, and its tool guard refuses file writes, commits, pushes and GitHub or Feishu writes, unless a person typed the latest message into the Executor Session after the hold began. Like blocked commands, the guard is a default, not a security boundary.
 
 A Ticket keeps its first hold until a person lifts it; the release delivers a `released` Input that tells the Executor to look at what came meanwhile and go on. The Ticket's end clears the hold. A hold or a release settles the message that asked for it, so that message does not go to Eval again when the Ticket ends.
+
+Two holds lift on more than a go-ahead:
+
+- **A checkpoint** is the Executor's hold on its own Ticket: a Report whose `human_action` question has `checkpoint` set holds the Ticket on that question, so the Executor changes nothing until a person approves. The Executor narrows only its own work, which needs no authority, and still cannot lift it. A person's approval is a release, decided as any release; it clears the question with the hold, and the `released` Input says that the person approved. A new question with `checkpoint` moves the hold to it.
+- **A takeover** is a person's hold that also ends the Executor's Assignments: `orchestrator_route` kind `takeover` on a person's message, or the panel's Take over. It replaces any other hold. The Executor Session, directory and branch stay for the person, who may also drive the Executor Session; nothing reaches the Executor, and the person's messages wait. The handback is a release: it starts a new Assignment, whose `released` Input tells the Executor to read the person's commits and changes and keep them. A pull request that merges or closes meanwhile ends the Ticket as it would without the takeover.
 - **Waiting conditions belong to Sources.** A condition such as "no assignee for N hours" would be a Source that waits and checks again itself; Eval never waits.
 
 ## When Eval does not finish

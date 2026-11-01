@@ -6,14 +6,16 @@ import type { DotState, IconName, TagTone } from './controls.tsx'
 
 export interface Mark { label: string; tone: TagTone; dot: DotState; icon: IconName }
 
-export function ticketMark(t: T, ticket: TicketStage & Pick<TicketSummary, 'ended'>): Mark {
+export function ticketMark(t: T, ticket: TicketStage & Pick<TicketSummary, 'ended'> & Partial<Pick<TicketSummary, 'hold'>>): Mark {
   switch (ticket.stage) {
     case 'ended': return { label: valueLabel(t, 'outcome', ticket.ended?.outcome), tone: 'neutral', dot: 'idle', icon: 'stop' }
     case 'person': {
       const action = ticket.action
       const icon: IconName = action === 'review' ? 'review' : action === 'failed' ? 'alert' : action === 'blocked' ? 'blocked'
         : action === 'delivery' ? 'inbox' : action === 'hold' ? 'pause' : 'ask'
-      return { label: t(`stage.${action}`), tone: action === 'failed' ? 'danger' : 'warning', dot: action === 'failed' ? 'error'
+      // A hold is labelled by what lifts it: a person's go-ahead, their approval of a checkpoint, or their handing the work back.
+      const label = action === 'hold' && ticket.hold?.until ? t(`stage.${ticket.hold.until}`) : t(`stage.${action}`)
+      return { label, tone: action === 'failed' ? 'danger' : 'warning', dot: action === 'failed' ? 'error'
         : 'warning', icon }
     }
     case 'working': return ticket.action === 'queued' ? { label: t('stage.queued'), tone: 'neutral', dot: 'idle', icon: 'queue' }

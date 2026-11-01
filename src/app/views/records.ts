@@ -121,7 +121,9 @@ export function ticketSummary(ticket: Ticket) {
   const note = ticketNote(ticket, stage)
   const state = liveTicket(ticket) ? 'open' as const : 'ended' as const
   return { id: ticket.id, title: ticket.title, state, ...stage, ...note ? { note } : {},
-    actions: { retry: canRetry(ticket), stop: liveTicket(ticket), hold: liveTicket(ticket) && !ticket.hold, release: liveTicket(ticket) && !!ticket.hold },
+    actions: { retry: canRetry(ticket), stop: liveTicket(ticket), hold: liveTicket(ticket) && !ticket.hold, release: liveTicket(ticket) && !!ticket.hold,
+      takeover: liveTicket(ticket) && ticket.hold?.until !== 'handback' },
+    ...ticket.hold ? { hold: { by: ticket.hold.by, reason: ticket.hold.reason, ...ticket.hold.until ? { until: ticket.hold.until } : {} } } : {},
     strength: ticket.mandate.strength, ended: ticket.ended,
     attention: ticket.attention && { ...ticket.attention, question: markdown(ticket.attention.question) },
       assignments: ticket.assignments.length, inputs: ticket.inputs.length, undelivered: ticket.undelivered.length,

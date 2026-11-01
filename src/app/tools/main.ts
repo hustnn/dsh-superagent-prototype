@@ -47,26 +47,26 @@ const fromDecision = (decision: Decision) => ({ decision: decision.kind, reason:
  * runs (`FIELDS`), so an item that lacks one, or whose value breaks a limit, is refused alone.
  */
 const RouteItemSchema = z.object({
-  kind: z.enum(['accept', 'attach', 'ignore', 'stop', 'hold', 'release']),
+  kind: z.enum(['accept', 'attach', 'ignore', 'stop', 'hold', 'takeover', 'release']),
   trigger_id: z.string().describe('The candidate card\'s trigger_id; deciding it decides its batch.'),
-  ticket_id: z.string().nullish().describe('attach, stop, hold and release: the ticket.'),
+  ticket_id: z.string().nullish().describe('attach, stop, hold, takeover and release: the ticket.'),
   title: z.string().nullish().describe('accept: a short label of at most 200 characters describing the original request; no added requirements or implementation advice.'),
   worktree_name: z.string().nullish().describe(`accept: ${WorktreeNameSchema.description ?? ''}`),
-  acknowledgement: z.string().nullish().describe(`accept: one brief sentence of at most ${IM_WORDS} words naming the concrete change and intended result in the source language. It is posted as a reply to the original source on acceptance, so do not quote the source; quote an earlier proposal briefly only when the trigger merely confirms it and the sentence does not already state it. No generic I will handle it. hold: optional, one sentence telling the person the work waits until they say to go on.`),
+  acknowledgement: z.string().nullish().describe(`accept: one brief sentence of at most ${IM_WORDS} words naming the concrete change and intended result in the source language. It is posted as a reply to the original source on acceptance, so do not quote the source; quote an earlier proposal briefly only when the trigger merely confirms it and the sentence does not already state it. No generic I will handle it. Optional for hold and takeover.`),
   note: z.string().nullish().describe(`accept and attach: ${RoutingNoteSchema.description ?? ''}`),
-  reason: z.string().nullish().describe('ignore, stop, hold and release: why, at most 500 characters; an ignore needs it.'),
+  reason: z.string().nullish().describe('Why, at most 500 characters; an ignore needs it.'),
 }).strict()
 type RouteItem = z.infer<typeof RouteItemSchema>
 type Kind = RouteItem['kind']
 type Field = Exclude<keyof RouteItem, 'kind' | 'trigger_id'>
 /** Each field's check, the kinds whose items read it and those that need it; an item of another kind leaves it unread. */
 const FIELDS: Record<Field, { check: z.ZodType; reads: readonly Kind[]; needs: readonly Kind[] }> = {
-  ticket_id: { check: z.string(), reads: ['attach', 'stop', 'hold', 'release'], needs: ['attach', 'stop', 'hold', 'release'] },
+  ticket_id: { check: z.string(), reads: ['attach', 'stop', 'hold', 'takeover', 'release'], needs: ['attach', 'stop', 'hold', 'takeover', 'release'] },
   title: { check: z.string().max(200), reads: ['accept'], needs: ['accept'] },
   worktree_name: { check: WorktreeNameSchema, reads: ['accept'], needs: ['accept'] },
-  acknowledgement: { check: AcknowledgementSchema, reads: ['accept', 'hold'], needs: ['accept'] },
+  acknowledgement: { check: AcknowledgementSchema, reads: ['accept', 'hold', 'takeover'], needs: ['accept'] },
   note: { check: RoutingNoteSchema, reads: ['accept', 'attach'], needs: [] },
-  reason: { check: z.string().max(500), reads: ['ignore', 'stop', 'hold', 'release'], needs: ['ignore'] },
+  reason: { check: z.string().max(500), reads: ['ignore', 'stop', 'hold', 'takeover', 'release'], needs: ['ignore'] },
 }
 /** Why an item cannot run: a field its kind needs is missing, or one it reads breaks its limit. */
 function invalid(item: RouteItem): string | undefined {
@@ -115,8 +115,11 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
       return { ...fromDecision(decision), triggerIds: decision.triggerIds }
     }
     // Like a stop, through `engine.decide`: only a person's message the gate admits with explicit strength holds or releases a ticket.
-    case 'hold': {
-      const decision = host.engine.decide(item.trigger_id, { kind: 'hold', ticketId: item.ticket_id!, reason: item.reason || { code: 'humanHold' },
+    // A takeover is a hold that ends the worker's run until the person hands the work back.
+    case 'hold': case 'takeover': {
+      const takeover = item.kind === 'takeover'
+      const decision = host.engine.decide(item.trigger_id, { kind: 'hold', ticketId: item.ticket_id!,
+        reason: item.reason || { code: takeover ? 'humanTakeover' : 'humanHold' }, ...takeover ? { until: 'handback' as const } : {},
         ...item.acknowledgement ? { acknowledgement: item.acknowledgement } : {} })
       return { ...fromDecision(decision), triggerIds: decision.triggerIds }
     }
@@ -137,7 +140,7 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
 function routeTool(host: MainToolsHost): Tool {
   return tool({
     name: 'orchestrator_route',
-    description: 'Route candidates, one item each by the card\'s trigger_id, in one call: accept an explicit request as a new ticket, attach a trigger to an existing ticket, stop a ticket on a person\'s stop message, hold or release it on a person\'s message asking it to wait or go on, or ignore a candidate that needs no ticket or stop, as dispatch says. Items run in order and each is answered on its own; a refused item leaves the others. An inferred candidate may be ignored here; accepting one goes through orchestrator_eval_decide.',
+    description: 'Route candidates, one item each by the card\'s trigger_id, in one call: accept an explicit request as a new ticket, attach a trigger to an existing ticket, stop a ticket on a person\'s stop message, hold, take over or release it on a person\'s message asking that, or ignore a candidate that needs no ticket or stop, as dispatch says. Items run in order and each is answered on its own; a refused item leaves the others. An inferred candidate may be ignored here; accepting one goes through orchestrator_eval_decide.',
     schema: z.object({ decisions: z.array(RouteItemSchema).min(1).max(20) }).strict(),
     execute: async ({ decisions }) => {
       const decided = new Map<string, string>()

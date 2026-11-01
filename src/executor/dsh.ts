@@ -100,9 +100,13 @@ export function mandateInstructions(mandate: Pick<Mandate, 'strength'>): string 
  */
 export function holdInstructions(ticket: Pick<Ticket, 'hold'>): string {
   const { hold } = ticket
-  return hold ? `\n## Hold\nA person put this ticket on hold (${hold.reason}). Until a person lifts it, do not edit files, commit, push, post `
-    + 'or acknowledge new work; read, answer questions and report progress. Only a person lifts a hold: when one asks you to go on, '
-    + 'call orchestrator_escalate with ask release.' : ''
+  if (!hold) return ''
+  const why = hold.until === 'approval' ? `You asked a person to approve before you go on (${hold.reason}).`
+    : hold.until === 'handback' ? `A person took this ticket over (${hold.reason}) and works on it until they hand it back.`
+    : `A person put this ticket on hold (${hold.reason}).`
+  return `\n## Hold\n${why} Until a person lifts it, do not edit files, commit, push, post or acknowledge new work; read, answer `
+    + 'questions and report progress. Only a person lifts a hold: when one approves or asks you to go on, call orchestrator_escalate '
+    + 'with ask release.'
 }
 /** Builds a newly accepted ticket's Execution metadata: its worktree name, workspace directory, and assignment text. */
 export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>, settings: Settings,
@@ -146,6 +150,9 @@ const RESUMED = 'This ticket ended earlier and the message that follows, on its 
   + 'report dropped without a message. Report ready when the follow-up is done. Do not repeat completed work.'
 const RELEASED = 'A person lifted the hold on this ticket. Look at what reached it meanwhile, such as CI, reviews and its PR, and go on '
   + 'with the assignment.'
+const APPROVED = 'A person approved what you asked before going on. Go on with the assignment as they approved it.'
+const HANDED_BACK = 'A person handed this ticket back after working on it themselves. Before you go on, read what they changed: git log and '
+  + 'git status in your directory, and its PR. Keep their changes, and go on with the assignment from there.'
 const RETRIED = 'A person retried this ticket. Continue the assignment from the current worktree, git history and PR state.'
 /** Formats a policy-change input for the worker; inputs recorded before `effect` existed fall back to a general notice. */
 function policyMessage(effect?: PolicyEffect): string {
@@ -172,7 +179,7 @@ export function inputMessage(input: TicketInput, trigger?: object): string | und
     ...input.context ? { context: true } : {} })
   if (input.kind === 'policy-changed') return policyMessage(input.effect)
   if (input.kind === 'resumed') return RESUMED
-  if (input.kind === 'released') return RELEASED
+  if (input.kind === 'released') return input.until === 'approval' ? APPROVED : input.until === 'handback' ? HANDED_BACK : RELEASED
   if (input.kind === 'note') return `Note from the orchestrator, for context only: ${input.text}`
   return input.kind === 'text' ? input.text : undefined
 }

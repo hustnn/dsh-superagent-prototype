@@ -44,8 +44,8 @@ export type AssessmentOutcome =
   | { kind: 'accept'; title: string; scope: string; reason: string | Reason; acknowledgement?: string; rules?: string[]; audit?: Record<string, unknown>;
     name?: string; note?: string }
   | { kind: 'stop'; ticketId: string; reason: string | Reason; audit?: Record<string, unknown> }
-  /** A person's hold on a live ticket; `acknowledgement` tells them it took effect. */
-  | { kind: 'hold'; ticketId: string; reason: string | Reason; acknowledgement?: string; audit?: Record<string, unknown> }
+  /** A person's hold on a live ticket, `handback` when they take the work over; `acknowledgement` tells them it took effect. */
+  | { kind: 'hold'; ticketId: string; reason: string | Reason; until?: 'handback'; acknowledgement?: string; audit?: Record<string, unknown> }
   /** A person lifts a ticket's hold. */
   | { kind: 'release'; ticketId: string; reason: string | Reason; audit?: Record<string, unknown> }
 

@@ -55,6 +55,9 @@ const TEXT = {
   holdConfirm: ['暂停“{title}”？执行器 Session 保留，仍可读取和回答；放行前它不改文件、不提交、不发消息，CI 等自动消息先不送达。', 'Hold "{title}"? Its Executor Session stays and can still read and answer; until you release it, it changes no file, commits and posts nothing, and automatic messages such as CI wait.'],
   release: ['放行', 'Release'],
   releaseTitle: ['放行工单', 'Release Ticket'],
+  takeover: ['接手', 'Take over'],
+  takeoverTitle: ['接手工单', 'Take over Ticket'],
+  takeoverConfirm: ['接手“{title}”？当前派工结束，执行器停下；Session、目录和分支留给你，在你交还（放行）之前它什么都不会做。', 'Take over "{title}"? Its current Assignment ends and its Executor stops; the Session, directory and branch are yours, and it does nothing until you hand it back with Release.'],
   releaseConfirm: ['放行“{title}”？执行器会查看暂停期间的变化，然后继续。', 'Release "{title}"? Its Executor looks at what changed meanwhile and goes on.'],
   policyVersion: ['策略版本', 'Policy version'],
   mediaMarker: ['[媒体]', '[Media]'],
@@ -353,6 +356,8 @@ const TEXT = {
   stopHint: ['停止后当前派工结束，Session 和执行目录保留；停止收回授权，之后线程里的消息不再恢复它，要继续需要重新接单。', 'Stopping ends the current Assignment; its Session and directory stay. Stopping withdraws its Mandate: later messages on its Threads do not resume it, and continuing needs a new accept.'],
   idleHint: ['执行器结束了当前回合，没有提出问题；这些工单订阅的线程收到新触发时继续。', 'The Executor ended its turn without asking anything; a new Trigger on a subscribed Thread resumes it.'],
   'stage.hold': ['已暂停', 'On hold'],
+  'stage.approval': ['待批准方案', 'Awaiting approval'],
+  'stage.handback': ['已由人接手', 'Taken over'],
   'stage.answer': ['待回答', 'Awaiting answer'],
   'stage.review': ['待验收', 'Awaiting review'],
   'stage.blocked': ['待处理受阻', 'Blocked'],
@@ -600,6 +605,8 @@ const TEXT = {
   'reason.stopNotExplicit': ['停止需要名单里的人明确要求', 'Stopping needs an explicit request from someone on the list'],
   'reason.humanHold': ['有人要求先等等', 'Someone asked to wait'],
   'reason.humanRelease': ['有人要求继续', 'Someone asked to go on'],
+  'reason.humanTakeover': ['有人接手了这项工作', 'Someone took the work over'],
+  'reason.takenOver': ['有人接手了这项工作', 'Someone took the work over'],
   'reason.holdUnknown': ['要暂停或放行的工单不存在或已结束', 'The Ticket to hold or release is unknown or ended'],
   'reason.holdNotExplicit': ['暂停或放行需要名单里的人明确要求', 'Holding or releasing needs an explicit request from someone on the list'],
   'reason.notHeld': ['工单没有暂停', 'The Ticket is not on hold'],
@@ -723,6 +730,7 @@ const TEXT = {
   'userError.workerDecides': ['这条消息已通过所在线程送达工单 {tickets}：由工单的执行器判断它是否属于这个工单，不属于的会被交回，之后作为候选到达。只有停止、暂停和放行例外，用 orchestrator_route 并把 kind 设为 stop、hold 或 release。', USER_ERRORS.workerDecides[1]],
   'userError.ticketHeld': ['有人暂停了这个工单（{reason}）：放行前可以回答和报告进展，但不能报告就绪、确认新工作或交付结果。', USER_ERRORS.ticketHeld[1]],
   'userError.notHeld': ['这个工单没有暂停。', USER_ERRORS.notHeld[1]],
+  'userError.checkpointWithoutQuestion': ['检查点需要在 human_action 里写明请人批准的问题。', USER_ERRORS.checkpointWithoutQuestion[1]],
   'userError.ackNoChannel': ['确认需要一条已派给这个执行器、由人发出的原始消息。', USER_ERRORS.ackNoChannel[1]],
   'userError.ackNotPerson': ['请使用最初那条人发的触发，而不是机器人、CI 或执行器的报告。', USER_ERRORS.ackNotPerson[1]],
   'userError.notReady': ['工单还不能交付。进展只在内部保留，等待经过验证的就绪报告；不要把进展当作回答，也不要通过其他渠道发送。', USER_ERRORS.notReady[1]],
@@ -777,7 +785,7 @@ export const GLOSSARY = {
 } as const
 export const GLOSSARY_VALUES = {
   decision: ['decision.accept', 'decision.reopen', 'decision.stop', 'decision.hold', 'decision.release', 'decision.ignore', 'decision.unavailable'], strength: ['strength.explicit', 'strength.inferred'],
-  ticket: ['stage.hold', 'stage.answer', 'stage.review', 'stage.blocked', 'stage.failed', 'stage.delivery', 'stage.queued', 'stage.working', 'stage.idle', 'ticket.ended'],
+  ticket: ['stage.hold', 'stage.approval', 'stage.handback', 'stage.answer', 'stage.review', 'stage.blocked', 'stage.failed', 'stage.delivery', 'stage.queued', 'stage.working', 'stage.idle', 'ticket.ended'],
   assignment: ['assignment.pending', 'assignment.running', 'assignment.ended'], report: ['report.progress', 'report.waiting', 'report.ready', 'report.blocked', 'report.failed', 'report.dropped'],
 } as const
 

@@ -256,8 +256,8 @@ export type TicketInput =
   | { id: string; kind: 'text'; text: string; at: string }
   /** A fact the main Session gave the ticket from other work: context, which asks for nothing and grants nothing. */
   | { id: string; kind: 'note'; text: string; at: string }
-  /** A person lifted the ticket's hold, `holdId`: by a message the main Session decided, `triggerId`, or in the panel. */
-  | { id: string; kind: 'released'; holdId: string; by: Hold['by']; triggerId?: string; at: string }
+  /** A person lifted the ticket's hold, `holdId`, of the kind `until`: by a message the main Session decided, `triggerId`, or in the panel. */
+  | { id: string; kind: 'released'; holdId: string; by: Hold['by']; triggerId?: string; until?: Hold['until']; at: string }
 
 /**
  * How a Policy change bears on a ticket: the rules it was accepted under that changed, with their instruction now, or no
@@ -277,11 +277,19 @@ export type TicketOutcome = 'completed' | 'merged' | 'closed' | 'dropped' | 'sto
 /** A question for a person; `triggerId` is the human message that raised it, whose conversation it goes back to. */
 export interface Attention { id: string; question: string; triggerId?: string }
 /**
- * A person's hold on a ticket: until a person lifts it, its worker reads and answers but changes and sends nothing, and the
- * automatic Inputs wait. `by` says where it came from: a person's message the main Session decided (`person`, with
- * `triggerId`), or the panel (`panel`).
+ * A hold on a ticket: until a person lifts it, its worker reads and answers but changes and sends nothing, and the automatic
+ * Inputs wait. `by` says where it came from: a person's message the main Session decided (`person`, with `triggerId`), the
+ * panel (`panel`), or the ticket's own worker, which asked a person to approve before it goes on (`executor`).
  */
-export interface Hold { id: string; by: 'person' | 'panel'; reason: string; triggerId?: string; at: string }
+export interface Hold {
+  id: string; by: 'person' | 'panel' | 'executor'; reason: string; triggerId?: string; at: string
+  /**
+   * What lifting it means, besides a person's go-ahead: their approval of the worker's question `attentionId` (`approval`),
+   * or a person who took the work over handing it back (`handback`), whose hold ended the worker's Assignment.
+   */
+  until?: 'approval' | 'handback'
+  attentionId?: string
+}
 /** Ticket aggregate: an authorized work item with its assignments, channels, thread bindings, and inputs. */
 export interface Ticket {
   id: string

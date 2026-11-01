@@ -43,7 +43,7 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
     ['arrive to you as candidates too', 'dispatch says when it needs a tool call']],
   ['A person\'s follow-up is its ticket\'s worker\'s to decide; the main Session only stops, holds or releases the work on request', 'dispatch',
     ['A follow_up reports a person\'s message that already reached the workers it lists', 'do not forward it a second time',
-      'act on a follow_up only when the person asks to stop the work, to wait, or to go on after a hold', 'never accept, attach or requeue it',
+      'act on a follow_up only when the person asks to stop the work, to wait, to take it over, or to go on after a hold', 'never accept, attach or requeue it',
       'arrives as a candidate with handed_back'],
     ['so it needs no decision', 'asks for new work beyond the ticket (orchestrator_ticket_accept']],
   ['A person\'s follow-up is its ticket\'s worker\'s to decide; the main Session only stops, holds or releases the work on request', 'subscriptions',
@@ -57,7 +57,7 @@ const RULES: [rule: string, file: string, says: string[], gone?: string[]][] = [
       'never drop a request silently', 'leave ordinary discussion unanswered']],
   // A hold is a fact the host records and enforces, not something a worker keeps in mind; only a person lifts it.
   ['A person\'s request to wait is a hold the main Session decides and the host keeps', 'dispatch',
-    ['A hold keeps the ticket open while its worker changes and sends nothing', 'release it only on a person\'s message that lifts it',
+    ['A hold keeps the ticket open while its worker changes and sends nothing', 'release only on a person\'s message that lifts it, approves or hands it back',
       'An escalation is a worker\'s reading of such a message']],
   ['A person\'s request to wait is a hold the main Session decides and the host keeps', 'work',
     ['is the orchestrator\'s to decide: pass it on with orchestrator_escalate, unacknowledged']],

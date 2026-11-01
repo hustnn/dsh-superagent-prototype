@@ -160,11 +160,13 @@ export class Engine {
    */
   stopTicket(ticketId: string, reason?: string): Ticket { return this.repo.atomic(() => this.tickets.stop(ticketId, reason)) }
   /**
-   * A person puts a ticket on hold in the panel: see `Tickets.hold`. A ticket on hold keeps the hold it has.
+   * A person puts a ticket on hold in the panel, or takes its work over (`handback`): see `Tickets.hold`. A ticket on hold
+   * keeps the hold it has, unless a person takes it over.
    * @throws UserError when the ticket is unknown or has ended.
    */
-  holdTicket(ticketId: string, reason?: string): Ticket {
-    return this.repo.atomic(() => this.tickets.hold(ticketId, { by: 'panel', reason: reason || reasonText({ code: 'humanHold' }) }))
+  holdTicket(ticketId: string, reason?: string, until?: 'handback'): Ticket {
+    const why = reason || reasonText({ code: until ? 'humanTakeover' : 'humanHold' })
+    return this.repo.atomic(() => this.tickets.hold(ticketId, { by: 'panel', reason: why, ...until ? { until } : {} }))
   }
   /**
    * A person lifts a ticket's hold in the panel: see `Tickets.release`.

@@ -320,7 +320,7 @@ export class Evals extends EnginePart {
     const triggerId = evaluation.primary ?? evaluation.triggerIds[0]!
     if (outcome.kind === 'release') this.tickets.release(ticket.id, 'person', triggerId)
     else this.tickets.hold(ticket.id, { by: 'person', reason: typeof outcome.reason === 'string' ? outcome.reason : reasonText(outcome.reason),
-      triggerId }, outcome.acknowledgement)
+      triggerId, ...outcome.until ? { until: outcome.until } : {} }, outcome.acknowledgement)
     return decision
   }
   /** Record an accept with the Mandate the Eval gives, and have Tickets create its ticket. */

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { Engine, MemoryRepositories, UserError, followupOwners, key, runningAssignment, ticketOutcome, ticketStage,
-  waitsForPerson } from '../src/core/index.ts'
+import { Engine, MemoryRepositories, UserError, followupOwners, key, latestAssignment as latestAssignmentOf, runningAssignment, ticketOutcome,
+  ticketStage, waitsForPerson } from '../src/core/index.ts'
 import type { Assessor, Assignment, Candidate, EngineOptions, Executor, OutboundMessage, Outcome, Policy, Ticket, Trigger } from '../src/core/index.ts'
 
 const member = { source: 'chat', id: 'alice' }
@@ -437,6 +437,72 @@ describe('hold and release', () => {
       .toEqual([['ticket.held', 'panel'], ['ticket.released', 'panel']])
     h.engine.stopTicket(ticketId)
     expect(() => h.engine.holdTicket(ticketId)).toThrow(new UserError('ticketEnded'))
+  })
+})
+describe('checkpoints and takeovers', () => {
+  const ci = (id: string) => trigger(id, { human: false, actor: { source: 'chat', id: 'ci' } })
+  it('holds a ticket on its worker\'s checkpoint until a person approves, which answers the question', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    const ticket = () => h.repo.tickets.get(ticketId)!
+    expect(() => h.engine.report(ticketId, { state: 'progress', summary: 'plan', checkpoint: true })).toThrow(new UserError('checkpointWithoutQuestion'))
+    h.engine.report(ticketId, { state: 'progress', summary: 'Two ways to do it.', question: 'Use plan A?', checkpoint: true })
+    const first = ticket().hold!
+    expect(first).toMatchObject({ by: 'executor', until: 'approval', reason: 'Use plan A?', attentionId: ticket().attention!.id })
+    expect(ticketStage(ticket())).toEqual({ stage: 'person', action: 'hold' })
+    expect(() => h.engine.report(ticketId, { state: 'ready', summary: 'done' })).toThrow(new UserError('ticketHeld', { reason: 'Use plan A?' }))
+    // A new question moves the checkpoint to it.
+    h.tick(1); h.engine.report(ticketId, { state: 'progress', summary: 'Rethought.', question: 'Use plan B?', checkpoint: true })
+    expect(ticket().hold).toMatchObject({ id: first.id, reason: 'Use plan B?', attentionId: ticket().attention!.id })
+    // A guest's approval lifts nothing; a person on the list approves, which answers the question and lets the worker go on.
+    h.engine.receive(trigger('2', { actor: guest, text: 'B is fine' })); h.settle()
+    expect(h.engine.decide('2', { kind: 'release', ticketId, reason: 'approved' })).toMatchObject({ kind: 'ignore', reason: [{ code: 'holdNotExplicit' }] })
+    h.engine.receive(trigger('3', { text: 'B is fine' })); h.settle()
+    const asked = ticket().attention!.id
+    expect(h.engine.decide('3', { kind: 'release', ticketId, reason: 'approved' })).toMatchObject({ kind: 'release' })
+    expect([ticket().hold, ticket().attention]).toEqual([undefined, undefined])
+    expect(h.withdrawn).toContain(key('attention-reply', asked))
+    expect(ticket().inputs.at(-1)).toMatchObject({ kind: 'released', until: 'approval', triggerId: '3' })
+    expect(h.engine.report(ticketId, { state: 'ready', summary: 'done' }).ended).toMatchObject({ outcome: 'completed' })
+  })
+  it('ends the worker\'s run on a takeover, keeps what comes for the person who works on it, and starts again on the handback', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    const ticket = () => h.repo.tickets.get(ticketId)!
+    const running = runningAssignment(ticket())!
+    // The worker took the message in; one it had not would wait for the next Assignment, as after a retry.
+    h.engine.receive(trigger('2', { text: 'I will take it from here' })); h.settle(); h.read(ticketId)
+    expect(h.engine.decide('2', { kind: 'hold', ticketId, reason: 'taking over', until: 'handback' })).toMatchObject({ kind: 'hold' })
+    expect(ticket().hold).toMatchObject({ by: 'person', until: 'handback', triggerId: '2' })
+    expect(ticket().assignments.find(item => item.id === running.id)).toMatchObject({ state: 'ended', endedReason: 'takenOver' })
+    expect(h.executor.stop).toHaveBeenCalledWith(expect.objectContaining({ id: ticketId }), expect.objectContaining({ id: running.id }), 'takenOver')
+    expect(ticketStage(ticket())).toEqual({ stage: 'person', action: 'hold' })
+    // CI is recorded but waits for nobody; a person's message waits for the worker that comes back.
+    h.engine.receive(ci('3')); h.engine.receive(trigger('4', { text: 'note for later' })); h.settle()
+    const inputOf = (id: string) => key('input', ticketId, 'trigger', id)
+    expect(ticket().undelivered).toEqual([inputOf('4')])
+    // A plain hold keeps a takeover, and a handback starts a new Assignment that reads the handback first.
+    h.engine.holdTicket(ticketId)
+    expect(ticket().hold).toMatchObject({ until: 'handback' })
+    h.engine.receive(trigger('5', { text: 'your turn' })); h.settle({ launch: false })
+    expect(h.engine.decide('5', { kind: 'release', ticketId, reason: 'handed back' })).toMatchObject({ kind: 'release' })
+    const released = ticket().inputs.find(input => input.kind === 'released')!
+    expect(released).toMatchObject({ until: 'handback', triggerId: '5' })
+    expect(ticket().undelivered.slice(0, 2)).toEqual([released.id, inputOf('4')])
+    expect(latestAssignmentOf(ticket())).toMatchObject({ state: 'pending' })
+    h.settle()
+    expect(runningAssignment(ticket())).toBeDefined()
+    expect(h.delivered.filter(([to]) => to === ticketId).map(([, input]) => input).slice(-3)).toEqual([released.id, inputOf('4'), inputOf('5')])
+  })
+  it('lets a takeover replace a plain hold, from the panel too, and ends a taken-over ticket when its pull request merges', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.bindThread(ticketId, { source: 'gh', id: 'pr-7' }, true)
+    h.engine.holdTicket(ticketId)
+    expect(h.engine.holdTicket(ticketId, undefined, 'handback').hold).toMatchObject({ by: 'panel', until: 'handback', reason: 'Human took the work over' })
+    h.tick(5); h.engine.threadClosed({ source: 'gh', id: 'pr-7' }, 'merged', new Date(Date.UTC(2026, 8, 23, 0, 1)).toISOString())
+    expect(h.repo.tickets.get(ticketId)).toMatchObject({ ended: expect.objectContaining({ outcome: 'merged' }) })
+    expect(h.repo.tickets.get(ticketId)!.hold).toBeUndefined()
   })
 })
 describe('follow-ups', () => {
