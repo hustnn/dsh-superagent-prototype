@@ -9,7 +9,7 @@ Each open Ticket has one stage, determined by what it is waiting for. Read the t
 | Stage | Condition | Panel label |
 | --- | --- | --- |
 | person / delivery | Delivering an Input to the Executor Session failed; it is retried after 2 seconds, then after a delay that doubles up to a minute, and a success, a new Assignment or the Ticket's end clears it | Input undelivered |
-| person / hold | A person put it on hold (see [002 Authorization](002-authorization.md)) | On hold |
+| person / hold | It has a Hold (see [002 Authorization](002-authorization.md)) | On hold · Awaiting approval for a checkpoint · Taken over for a takeover |
 | person / answer | It has an Attention | Awaiting answer |
 | person / review | The latest Report is `ready` | Awaiting review |
 | person / blocked, failed | The latest Report is `blocked` or `failed`, and no person's message reached the Ticket since | Blocked · Failed |

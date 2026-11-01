@@ -22,6 +22,13 @@ it('marks each Ticket stage by whom it waits for, and an ended Ticket by its out
     'ongoing', 'ongoing'])
 })
 
+it('labels a held Ticket by what lifts its hold: a go-ahead, an approval of its checkpoint, or the handback of a takeover', () => {
+  const held = (until?: 'approval' | 'handback') => ticketMark(t, { stage: 'person', action: 'hold', ended: undefined,
+    hold: { by: until === 'approval' ? 'executor' : 'person', reason: 'x', ...until ? { until } : {} } })
+  expect([held(), held('approval'), held('handback')].map(({ label, tone, icon }) => [label, tone, icon])).toEqual([['已暂停', 'warning', 'pause'],
+    ['待批准方案', 'warning', 'pause'], ['已由人接手', 'warning', 'pause']])
+})
+
 it('marks each Thread stage, Source state and Decision outcome', () => {
   const threads = (['error', 'evaluating', 'queued', 'subscribed', 'dormant', 'unsubscribed'] as const).map(stage => threadMark(t,
     { stage, pending: 2 }))

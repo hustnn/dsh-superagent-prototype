@@ -76,7 +76,7 @@ Callers receive only their role's `Pick` of the Engine: `EngineForSources`, `Eng
 | Main Session | `note(ticketId, text)` | Gives a Ticket's Executor a fact from other work as a text Input, which grants nothing |
 | Main Session, Executor | `reply(request)` | Queues a message for the Channel its purpose names: `acknowledgement`, `answer`, `result` or `attention` |
 | People | `stopTicket(ticketId, reason?)` | A person's stop, which withdraws the Mandate |
-| People | `holdTicket(ticketId, reason?)`, `releaseTicket(ticketId)` | A person's hold from the panel, kept until a person lifts it (`Tickets.hold`, `Tickets.release`); a release delivers a `released` Input |
+| People | `holdTicket(ticketId, reason?, until?)`, `releaseTicket(ticketId)` | A person's hold from the panel, or a takeover with `until: 'handback'`, which ends the Assignments, kept until a person lifts it (`Tickets.hold`, `Tickets.release`); a release delivers a `released` Input, and the release of a takeover starts a new Assignment |
 | People | `retryTicket(ticketId)` | Ends the stalled Assignment of a Ticket that waits for a person after a `failed` or `blocked` Report, or whose Input delivery failed (`canRetry`), and starts a new one |
 | People | `reevaluate(triggerId)` | Queues a stored Trigger for a fresh Eval |
 | People | `unsubscribe(thread)` | Drops every Subscription on a Thread, and the Tickets that followed it follow it no more; each keeps deciding the follow-ups it received there |
@@ -512,7 +512,7 @@ The main Session has 15 application tools:
 | Communicate and unsubscribe | `orchestrator_reply`, `orchestrator_thread_unsubscribe` |
 | Configure | `orchestrator_settings_save`, `orchestrator_policy_sync`, `orchestrator_prompts_save` |
 
-`orchestrator_route` accepts 1–20 decisions in order. Each accept, attach, stop, hold, release or ignore runs as a separate Engine command. It also permits ignoring an inferred candidate directly from its card. `orchestrator_ticket_note` sends a fact as context, not authority.
+`orchestrator_route` accepts 1–20 decisions in order. Each accept, attach, stop, hold, takeover, release or ignore runs as a separate Engine command; a takeover is a hold with `until: 'handback'`. It also permits ignoring an inferred candidate directly from its card. `orchestrator_ticket_note` sends a fact as context, not authority.
 
 Settings saves select `policy`, `eval`, `executor`, `pause`, or `source`; the last also names its Source id. A prompt save with `preview: true` composes text without saving.
 
@@ -534,11 +534,11 @@ Each Executor has seven application tools:
 | --- | --- |
 | `orchestrator_read` | Read resources available to its own Ticket |
 | `orchestrator_ack` | Acknowledge a request |
-| `orchestrator_report` | Report progress or an outcome, binding a pull request under the pull-request rules |
+| `orchestrator_report` | Report progress or an outcome, binding a pull request under the pull-request rules; with `checkpoint`, hold the Ticket on its question until a person approves; with `memo`, index it for later searches |
 | `orchestrator_thread_unrelated` | Drop an unrelated attached Thread, hand back its owned follow-ups and tell the main Session why |
 | `orchestrator_thread_follow` | Subscribe to a related Thread for context and tell the main Session |
 | `orchestrator_trigger_handback` | Hand back a message once, with a reason carried by its candidate |
-| `orchestrator_escalate` | Pass the main Session a person's message on its Ticket's own Threads that asks to stop, wait or go on; the main Session decides it |
+| `orchestrator_escalate` | Pass the main Session a person's message on its Ticket's own Threads that asks to stop, wait, take the work over or go on; the main Session decides it |
 
 A hand-back returns `queued: false` if another Ticket still owns the message, or this Ticket never owned it. For example, a bot message went to Eval independently.
 

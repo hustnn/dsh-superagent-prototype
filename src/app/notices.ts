@@ -89,7 +89,7 @@ const FOLLOWUP_NOTE = 'Its ticket\'s worker has it and decides; act only if the 
  * Words with which a person may ask to stop a ticket, have it wait, or go on. A follow-up with one wakes the main Session,
  * which alone decides those; any other reaches it as a notice it reads at its next turn, since the ticket's worker decides it.
  */
-const CONTROL_WORDS = /停|先别|别做|不用了|取消|等等|等一下|先等|继续|可以了|接着做|\b(?:stop|hold|wait|pause|cancel|resume|go ahead|continue)\b/i
+const CONTROL_WORDS = /停|先别|别做|不用了|取消|等等|等一下|先等|继续|可以了|接着做|接手|自己来|交还|还给你|同意|批准|\b(?:stop|hold|wait|pause|cancel|resume|go ahead|continue|take over|hand back|approved?|lgtm)\b/i
 /**
  * Builds the follow-up for a human trigger that reached at least one live ticket (including an ended ticket that resumed on
  * the follow-up), with the trigger rendered as workers read it, the replied-to message, and the open tickets it reached;
@@ -123,7 +123,7 @@ export function followupRelay(message: { trigger_id: string; text?: string },
     summary: `A person's message reached ticket ${tickets.map(ticket => ticket.ticket_id).join(', ')}` }
 }
 /** What a worker reads a person's message as asking of its ticket, in the escalation it relays. */
-const ASKS = { stop: 'stop the work', hold: 'wait', release: 'go on after a hold' } as const
+const ASKS = { stop: 'stop the work', hold: 'wait', takeover: 'take the work over themselves', release: 'go on after a hold, or approve what its worker asked' } as const
 /**
  * A worker's escalation of a person's message on its ticket's threads that may ask to stop the ticket, have it wait, or go
  * on, which only the main Session decides: it wakes the main Session at once, whether or not the words were ones it knows.

@@ -29,9 +29,9 @@ State that the issue is fixed only if the worker report supports it; otherwise s
 Do not post a redundant notification on the merged PR itself or guess another recipient.
 
 A follow_up reports a person's message that already reached the workers it lists, including workers that reported blocked; one whose words may ask to stop, wait or go on arrives as a message, the others as background notices; do not forward it a second time.
-Each such worker decides whether the message belongs to its ticket; act on a follow_up only when the person asks to stop the work, to wait, or to go on after a hold (orchestrator_route kind stop, hold or release with its trigger_id), never accept, attach or requeue it.
+Each such worker decides whether the message belongs to its ticket; act on a follow_up only when the person asks to stop the work, to wait, to take it over, or to go on after a hold (orchestrator_route kind stop, hold, takeover or release with its trigger_id), never accept, attach or requeue it.
 After that stop ends the ticket, you may accept the rest of the message as new work, as any explicit request.
-A hold keeps the ticket open while its worker changes and sends nothing: give it an acknowledgement saying the work waits until the person says to go on, and release it only on a person's message that lifts it.
+A hold keeps the ticket open while its worker changes and sends nothing, a takeover also ends its run, and a hold the worker placed waits for approval of its question: acknowledge that the work waits until the person says to go on, and release only on a person's message that lifts it, approves or hands it back.
 An escalation is a worker's reading of such a message: decide it the same way, or leave it when the person did not ask that.
 A worker hands back a request beyond its ticket or for another one, which then arrives as a candidate with handed_back; a ticket marked context only follows that thread.
 Preserve explicit human stops and requests to wait: hold a ticket a person asks to wait, and do not accept new work a person said to wait for until they lift that.

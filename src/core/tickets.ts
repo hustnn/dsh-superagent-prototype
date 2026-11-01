@@ -146,16 +146,22 @@ export class Tickets extends EnginePart {
   /**
    * Put an open ticket on hold for a person: until a person lifts it (see `release`), the automatic Inputs wait, and its
    * worker reads and answers but may not report ready, acknowledge new work or deliver a result. A ticket keeps the hold it
-   * has; the acknowledgement, if any, tells the person whose message placed this one that it took effect.
+   * has, unless a person takes the work over (`handback`): that hold replaces any other and ends the worker's Assignments, so
+   * nothing reaches the worker until they hand it back, while its Session and directory stay theirs. The acknowledgement, if
+   * any, tells the person whose message placed it that it took effect.
    * @throws UserError when the ticket is unknown or has ended.
    */
   hold(ticketId: string, hold: Omit<Hold, 'id' | 'at'>, acknowledgement?: string): Ticket {
     const ticket = this.require(ticketId)
     if (!liveTicket(ticket)) throw new UserError('ticketEnded')
     const at = this.now()
-    if (!ticket.hold) {
+    const takeover = hold.until === 'handback' && ticket.hold?.until !== 'handback'
+    if (!ticket.hold || takeover) {
       ticket.hold = { id: key('hold', ticketId, at), ...hold, at }; ticket.updatedAt = at
+      const stopping = takeover ? ticket.assignments.filter(assignment => assignment.state !== 'ended') : []
+      for (const assignment of stopping) { this.requeueUntaken(ticket, assignment); this.endAssignment(ticket, assignment, 'takenOver') }
       this.repo.tickets.save(ticket)
+      for (const assignment of stopping) this.options.executor.stop(ticket, assignment, 'takenOver')
       this.emit('ticket.held', { ticketId, by: hold.by })
     }
     const trigger = hold.triggerId ? this.repo.triggers.get(hold.triggerId) : undefined
@@ -164,7 +170,8 @@ export class Tickets extends EnginePart {
   }
   /**
    * Lift an open ticket's hold for a person, by the message `triggerId` or in the panel: the automatic Inputs that come next
-   * reach its worker again, and a `released` Input tells it to look at what changed meanwhile and go on.
+   * reach its worker again, and a `released` Input tells it to look at what changed meanwhile and go on. Lifting a checkpoint
+   * answers the question it asked; work a person handed back goes on in a new Assignment, in the same Session and directory.
    * @throws UserError when the ticket is unknown, has ended, or is not on hold.
    */
   release(ticketId: string, by: Hold['by'], triggerId?: string): Ticket {
@@ -173,8 +180,16 @@ export class Tickets extends EnginePart {
     const hold = ticket.hold
     if (!hold) throw new UserError('notHeld')
     delete ticket.hold
-    this.addInput(ticket, { id: key('input', ticketId, 'released', hold.id), kind: 'released', holdId: hold.id, by, ...triggerId ? { triggerId } : {},
-      at: this.now() })
+    if (hold.attentionId && ticket.attention?.id === hold.attentionId) { delete ticket.attention; this.replies.withdrawAttention(hold.attentionId) }
+    const released: TicketInput = { id: key('input', ticketId, 'released', hold.id), kind: 'released', holdId: hold.id, by,
+      ...triggerId ? { triggerId } : {}, ...hold.until ? { until: hold.until } : {}, at: this.now() }
+    if (hold.until === 'handback') {
+      // The new Assignment reads the handback before the messages that waited for it.
+      const assignment = this.newAssignment(ticket)
+      ticket.inputs.push(released); ticket.undelivered.unshift(released.id); ticket.updatedAt = released.at
+      this.repo.tickets.save(ticket)
+      this.options.executor.start(ticket, assignment)
+    } else this.addInput(ticket, released)
     this.emit('ticket.released', { ticketId, by })
     return this.require(ticketId)
   }

@@ -1610,6 +1610,53 @@ it('holds a ticket on a person\'s message: its worker reads and answers but chan
   expect(sections.get(sessionId)!.text({})).not.toContain('## Hold')
 })
 
+it('holds a ticket on its worker\'s checkpoint until a person approves, and goes on as approved', async () => {
+  const { ticket, sessionId } = await acceptedTicket()
+  expect(await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'Two approaches.', human_action: '用方案 A 还是 B？',
+    checkpoint: true })).toMatchObject({ reported: true, attention: { question: '用方案 A 还是 B？' } })
+  expect(runtime.store.tickets.get(ticket.id)!.hold).toMatchObject({ by: 'executor', until: 'approval' })
+  expect(sections.get(sessionId)!.text({})).toContain('You asked a person to approve before you go on (用方案 A 还是 B？).')
+  expect(guards.get(sessionId)!({ name: 'edit', arguments: {} })).toContain('on hold')
+  // The approval's words wake the main Session, which lifts the checkpoint; the worker hears it was approved.
+  deliveries.mockClear()
+  const approve = feishu('2', '同意，用方案 B', { mentions: [], root_id: 'om_1' })
+  await receive(approve)
+  expect(relays(runtime.masterId)).toEqual([expect.objectContaining({ kind: 'follow_up', trigger_id: approve.id })])
+  expect(await route({ kind: 'release', ticket_id: ticket.id, trigger_id: approve.id })).toMatchObject({ decision: 'release' })
+  const approved = runtime.store.tickets.get(ticket.id)!
+  expect([approved.hold, approved.attention]).toEqual([undefined, undefined])
+  await vi.waitFor(() => expect(relays(sessionId).some(item => String(item.text).includes('approved what you asked'))).toBe(true))
+})
+
+it('ends the worker\'s run when a person takes the work over, and starts it again from their changes on the handback', async () => {
+  const { ticket, sessionId } = await acceptedTicket()
+  const agent = agents.get(sessionId)!
+  deliveries.mockClear()
+  const mine = feishu('2', '这个我来接手，我自己改', { mentions: [], root_id: 'om_1' })
+  await receive(mine)
+  expect(relays(runtime.masterId)).toEqual([expect.objectContaining({ kind: 'follow_up', trigger_id: mine.id })])
+  expect(await route({ kind: 'takeover', ticket_id: ticket.id, trigger_id: mine.id, acknowledgement: '好的，交给你了，改完说一声。' }))
+    .toMatchObject({ decision: 'hold', ticket: expect.objectContaining({ hold: expect.objectContaining({ by: 'person' }) }) })
+  const taken = runtime.store.tickets.get(ticket.id)!
+  expect(taken.hold).toMatchObject({ until: 'handback', reason: 'Human took the work over' })
+  expect(taken.assignments.at(-1)).toMatchObject({ state: 'ended', endedReason: 'takenOver' })
+  await vi.waitFor(() => expect(agent.cancel).toHaveBeenCalled())
+  expect(sections.get(sessionId)!.text({})).toContain('A person took this ticket over (Human took the work over)')
+  expect(runtime.store.replyStatus(key('ack', mine.id))).toBeDefined()
+  // A person's message meanwhile waits; the handback starts a new Assignment, which reads the handback before it.
+  const note = feishu('3', '顺便看下标题的问题', { mentions: [], root_id: 'om_1' })
+  await receive(note)
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)).toMatchObject({ state: 'ended' })
+  deliveries.mockClear()
+  const back = feishu('4', '改好了，交还给你', { mentions: [], root_id: 'om_1' })
+  await receive(back)
+  expect(await route({ kind: 'release', ticket_id: ticket.id, trigger_id: back.id })).toMatchObject({ decision: 'release' })
+  await vi.waitFor(() => expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)).toMatchObject({ state: 'running' }))
+  await vi.waitFor(() => expect(relays(sessionId).some(item => String(item.text).includes('handed this ticket back'))).toBe(true))
+  const texts = relays(sessionId).map(item => String(item.trigger_id ?? item.text))
+  expect(texts.findIndex(text => text.includes('handed this ticket back'))).toBeLessThan(texts.indexOf(note.id))
+})
+
 it('finds earlier work by its words: a candidate card names similar tickets, and orchestrator_recall finds one by its memo', async () => {
   const { ticket, sessionId } = await acceptedTicket(feishu('1', '@bot 暗色模式下表格行高太高'))
   await runTool(sessionId, 'orchestrator_report', { state: 'dropped', summary: 'Already fixed upstream.',

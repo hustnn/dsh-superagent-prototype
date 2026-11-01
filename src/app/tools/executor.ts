@@ -79,7 +79,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
       description: 'Pass the orchestrator a person\'s message on this ticket\'s threads that asks to stop it, wait or go on after a hold, as the work section says; the orchestrator decides it.',
       schema: z.object({
         trigger_id: z.string().min(1),
-        ask: z.enum(['stop', 'hold', 'release']).describe('What the person asks: stop the work, hold it until they say to go on, or release a hold.'),
+        ask: z.enum(['stop', 'hold', 'takeover', 'release']).describe('What the person asks: stop the work, hold it, take it over, or release a hold.'),
         reason: z.string().trim().min(1).max(300).describe('One sentence on what the person asks.'),
       }).strict(),
       execute: async args => host.store.atomic(() => {
@@ -110,6 +110,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         question_for_trigger_id: z.string().optional().describe('With human_action: the human message that raised the question, which is asked where that person wrote.'),
         pr_number: z.number().int().positive().nullish().describe(`The ticket's PR: its source PR, or one by ${host.github.deployment.github.login} from a branch named after this ticket (DSH_SUPERAGENT_NAME).`),
         reply_to_trigger_id: z.string().optional().describe('The explicit human question this report answers; never for ordinary progress.'),
+        checkpoint: z.boolean().optional().describe('With human_action: hold until a person approves.'),
         memo: z.object({ summary: z.string().trim().min(1).max(600), keywords: z.array(z.string().trim().min(1).max(40)).max(8) }).strict()
           .optional().describe('With ready or dropped: what changed, and keywords in English and the source language, which later searches find the ticket by.'),
       }).strict(),
@@ -125,7 +126,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
           if (args.memo) host.ledger.index(ticketId, args.memo)
           const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
-            ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
+            ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}), ...(args.checkpoint ? { checkpoint: true } : {}) }
           const updated = host.engine.report(ticketId, report)
           // A result that leaves the ticket open, such as a PR that waits for review, is found by its summary from now.
           if (args.state === 'ready' && !updated.ended) host.ledger.index(ticketId)

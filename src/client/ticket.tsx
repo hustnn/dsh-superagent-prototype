@@ -133,6 +133,8 @@ export function TicketPage({ id }: { id: string }) {
         onConfirm={() => after(call('POST tickets/:id/retry', { id }))} />}
       {data.actions.hold && <ConfirmButton variant="outline" icon="pause" label={t('hold')} title={t('holdTitle')}
         message={t('holdConfirm', { title: data.title })} onConfirm={() => after(call('POST tickets/:id/hold', { id }))} />}
+      {data.actions.takeover && <ConfirmButton variant="outline" icon="user" label={t('takeover')} title={t('takeoverTitle')}
+        message={t('takeoverConfirm', { title: data.title })} onConfirm={() => after(call('POST tickets/:id/takeover', { id }))} />}
       {data.actions.release && <ConfirmButton variant="outline" icon="play" label={t('release')} title={t('releaseTitle')}
         message={t('releaseConfirm', { title: data.title })} onConfirm={() => after(call('POST tickets/:id/release', { id }))} />}
       {data.sessionId && <SessionButton variant="outline" sessionId={data.sessionId} />}

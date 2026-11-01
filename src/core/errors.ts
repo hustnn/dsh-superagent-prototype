@@ -29,6 +29,7 @@ export const USER_ERRORS = {
   workerDecides: ['refused', 'This message reached ticket {tickets} on its thread: its worker decides whether it belongs there and hands back what does not, which then arrives as a candidate. Only a stop, a hold or a release goes through orchestrator_route, with kind stop, hold or release'],
   ticketHeld: ['refused', 'A person put this ticket on hold ({reason}): until a person lifts it, answer and report progress, but do not report ready, acknowledge new work or deliver a result'],
   notHeld: ['refused', 'This ticket is not on hold'],
+  checkpointWithoutQuestion: ['refused', 'A checkpoint needs the question a person approves in human_action'],
   ackNoChannel: ['refused', 'Acknowledgement requires an assigned human source message'],
   ackNotPerson: ['refused', 'Use the original human trigger, not a bot, CI or worker report'],
   notReady: ['refused', 'Ticket is not ready for delivery. Keep progress internal and wait for a verified ready report; do not relabel progress as an answer or send it through another channel.'],

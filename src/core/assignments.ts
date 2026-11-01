@@ -17,6 +17,8 @@ export interface WorkerReport {
   askedBy?: string
   /** The person's question this report answers, which the worker thereby takes up; authorizes the main Session to send an answer reply. */
   answers?: string
+  /** With `question`: hold the ticket until a person approves what it asks, so its worker changes nothing meanwhile. */
+  checkpoint?: boolean
 }
 const RECOVERY_NOTE = 'The host restarted during this ticket. Inspect the current worktree, git history and GitHub state before continuing. Do not repeat an already completed external operation. Finish the original assignment and report its status.'
 
@@ -94,7 +96,8 @@ export class Assignments extends EnginePart {
    * Records a worker status report on an open ticket's current assignment, updating `attention`, `answers`, held automated
    * inputs, and ending the ticket when `dropped` or when `ready` and not waiting on followed threads (`followsDone`).
    * @throws UserError for an unknown or ended ticket, an ended assignment, a question combined with a ready result or answer,
-   * a ready report while a person holds the ticket, or a question/answer referencing a non-human or unreached trigger.
+   * a ready report while a person holds the ticket, a checkpoint without a question, or a question/answer referencing a
+   * non-human or unreached trigger.
    */
   report(ticketId: string, report: WorkerReport): Ticket {
     const ticket = this.require(ticketId)
@@ -102,6 +105,7 @@ export class Assignments extends EnginePart {
     if (report.question && (report.state === 'ready' || report.answers)) throw new UserError('questionWithResult')
     if (report.askedBy && !report.question) throw new UserError('askerWithoutQuestion')
     if (report.state === 'ready' && ticket.hold) throw new UserError('ticketHeld', { reason: ticket.hold.reason })
+    if (report.checkpoint && !report.question) throw new UserError('checkpointWithoutQuestion')
     const person = (id: string, channel: boolean) => {
       const trigger = this.repo.triggers.get(id)
       return !!trigger?.human && (!channel || !!trigger.channel) && this.reaches(ticket, trigger, false)
@@ -118,6 +122,12 @@ export class Assignments extends EnginePart {
     const attention = report.question === null || report.state === 'ready' ? undefined : asked
     if (attention) ticket.attention = attention
     else delete ticket.attention
+    // A checkpoint holds the ticket on the question it asks, which a person's approval answers; a new question moves it there.
+    const checkpoint = ticket.hold?.until === 'approval' ? ticket.hold : undefined
+    if (report.checkpoint && attention && (!ticket.hold || checkpoint)) {
+      ticket.hold = { id: checkpoint?.id ?? key('hold', ticketId, at), by: 'executor', until: 'approval', reason: attention.question.slice(0, 200),
+        attentionId: attention.id, at: checkpoint?.at ?? at }
+    }
     // A replaced or cleared attention question withdraws any pending unsent reply for the previous question from the outbox.
     if (previous && previous.id !== attention?.id) this.replies.withdrawAttention(previous.id)
     assignment.report = { state: report.state, summary: report.summary, at }
@@ -126,6 +136,7 @@ export class Assignments extends EnginePart {
     if (report.answers) this.takeUp(ticketId, report.answers)
     if (report.state === 'blocked' || report.state === 'failed') ticket.undelivered = ticket.undelivered.filter(id => !automatic(ticket.inputs.find(input => input.id === id)))
     this.repo.tickets.save(ticket)
+    if (report.checkpoint && ticket.hold?.by === 'executor' && !checkpoint) this.emit('ticket.held', { ticketId, by: 'executor' })
     // A ticket that follows Threads ends with them: a ready report ends it only once followsDone holds, with that outcome.
     const ready = !ticket.follows?.length ? 'completed' : this.tickets.followsDone(ticket)?.outcome
     // A dropped report after a close the ticket deferred ends it as the close did, which its final notice tells.
