@@ -4,6 +4,7 @@ import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import { ROUTER_PRESET, WORKER_PRESET } from '../src/app/sessions.ts'
+import { ASSESSOR_PRESET } from '../src/app/assessment.ts'
 
 interface Row { id?: string; name: string; disabled?: unknown; config?: Record<string, unknown> & { plugins?: Row[] } | Row[] }
 /** The patch as DSH reads it: Cordis's include plugin parses `!!js` scalars, and applies the inserts to an entry list. */
@@ -29,7 +30,7 @@ const presetOf = (rows: readonly Row[], id: string) => rows.map(row => row.confi
 it('defines the worker preset Executor Sessions run under, with a shell that moves long commands to the background', async () => {
   const rows = await patched()
   expect(rows.map(row => row.id)).toEqual(['dsh-superagent', 'dsh-superagent-github', 'dsh-superagent-feishu', 'dsh-superagent-worker-preset',
-    'dsh-superagent-router-preset'])
+    'dsh-superagent-router-preset', 'dsh-superagent-assessor-preset'])
   const preset = presetOf(rows, WORKER_PRESET)
   expect(preset.id).toBe(WORKER_PRESET)
   const plugins = flat(preset.plugins)
@@ -70,4 +71,9 @@ it('defines the router preset the main Session runs under: the worker\'s 5-secon
     '@deepseek-ai/dsh-tool-todo', '@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present', '@deepseek-ai/dsh-plan-mode',
     '@deepseek-ai/dsh-plugin-manager/tools', '@deepseek-ai/dsh-plugin-market/tools', '@deepseek-ai/dsh-tool-schedule', '@deepseek-ai/dsh-tool-goal',
     '@deepseek-ai/dsh-command-goal', '@deepseek-ai/dsh-tool-workflow', '@deepseek-ai/dsh-workflow-ptc']) expect(names, name).not.toContain(name)
+})
+
+it('defines the assessor preset its subagents run under: the time and nothing else, since their tools and prompt are dsh-superagent\'s', async () => {
+  const assessor = presetOf(await patched(), ASSESSOR_PRESET)
+  expect([assessor.order, flat(assessor.plugins).map(row => row.name)]).toEqual([92, ['@deepseek-ai/dsh-time-context']])
 })

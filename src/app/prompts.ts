@@ -2,7 +2,8 @@
 import { z } from 'zod'
 import { UserError, key } from '../core/index.ts'
 import { policyVersion, type Settings, type SettingsOrigin } from '../policy.ts'
-import { masterPrompt, workerPrompt, sharedPrompt, guides, mainAdmissionPolicy, handoffPolicy, teamDefaults, sourceSkills, cliNotes } from './context.ts'
+import { masterPrompt, workerPrompt, sharedPrompt, guides, mainAdmissionPolicy, assessorPrompt, handoffPolicy, teamDefaults, sourceSkills, cliNotes }
+  from './context.ts'
 import { environmentLines, type Variable } from './execution-environment.ts'
 import { promptsNotice } from './notices.ts'
 import type { Sessions } from './sessions.ts'
@@ -99,7 +100,7 @@ export function policySection(settings: Settings, config: PromptConfig = default
  * Assemble a role's system prompt sections in order from fixed templates, team sections, the generated execution environment
  * and, last, the main Session's generated Policy section, which nothing follows, and whose change leaves the rest unchanged.
  */
-export function promptParts(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }) {
+export function promptParts(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }, pooled = false) {
   // A built-in part names the key its text is overridden by, which for the handoff names the role.
   const fixed = (name: string, part = name) => ({ name, kind: 'fixed' as const, key: part, text: builtIn(config, part as PartKey) })
   const team = (name: TeamSection) => ({ name, kind: 'team' as const, heading: `## ${TEAM_HEADINGS[name]}`,
@@ -108,7 +109,8 @@ export function promptParts(config: PromptConfig, role: Role, environment?: stri
     fixed('runtime/shared'), fixed(`runtime/${role}`),
     ...TEAM_SECTIONS.map(team),
     ...['subscriptions', 'replies', role === 'orchestrator' ? 'dispatch' : 'work'].map(name => fixed(`runtime/${name}`)),
-    ...role === 'orchestrator' ? [fixed('runtime/admission')] : [],
+    // Assessor subagents assess proactive candidates instead of a pooled main Session, which then needs no admission rules.
+    ...role === 'orchestrator' && !pooled ? [fixed('runtime/admission')] : [],
     fixed('runtime/handoff', `runtime/handoff/${role}`),
     ...environment ? [{ name: 'runtime/environment', kind: 'generated' as const, key: 'runtime/environment', text: environment }] : [],
     ...role === 'orchestrator' && policy ? [{ name: 'runtime/policy', kind: 'generated' as const, ...policy }] : [],
@@ -138,9 +140,20 @@ export class Prompts {
     private readonly feishu: () => boolean) {
     this.versions = new Versions(store, KV.prompts.revision, KV.prompts.version)
   }
-  /** A role's prompt; the main Session's Policy section follows the settings as they are now, at each model request. */
+  /**
+   * A role's prompt; the main Session's Policy section follows the settings as they are now, at each model request. While
+   * assessor subagents assess proactive candidates (`eval.assessors`), the main Session has neither admission nor Policy.
+   */
   compose(config: PromptConfig, role: Role, variables = this.environment()): string {
-    return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined)
+    const settings = this.store.settings(), pooled = settings.eval.assessors > 0
+    const policy = role === 'orchestrator' && !pooled ? policySection(settings, config) : undefined
+    return promptParts(config, role, environmentSection(config, variables), policy, pooled).map(part => part.text).join('\n\n')
+  }
+  /** An assessor subagent's prompt: what it is, then the main Session's shared, admission and Policy sections, as a team overrides them. */
+  assessor(config: PromptConfig): string {
+    const parts = promptParts(config, 'orchestrator', undefined, policySection(this.store.settings(), config))
+      .filter(part => ['runtime/shared', 'runtime/admission', 'runtime/policy'].includes(part.name))
+    return [assessorPrompt, ...parts.map(part => part.text)].join('\n\n')
   }
   /** Returns skills to register in every Session: built-in Source skills (`feishu` only when a Feishu bot is configured) followed by team skills. */
   skills(config: PromptConfig): [string, string][] {

@@ -299,6 +299,95 @@ it('assesses a proactive observation in the orchestrator Session and creates the
   expect(await runTool(`worker-${ticket.id}`, 'orchestrator_read', { resource: `ticket/${ticket.id}/assignment` })).toMatchObject({ text: expect.stringContaining('Proactively accepted under copy') })
 })
 
+/** A run of an assessor subagent the fake subagent service started, which a test ends with `finish`. */
+interface AssessorTestRun {
+  spec: { provider: string; delivery: string; childId: string; request: { parent: { id: string }; agentPreset: string; prompt: { text: string }[] } }
+  finish: (stopReason: string) => void; dispose: ReturnType<typeof vi.fn>
+}
+/** Mount a subagent service that spawns assessor children of the main Session as DSH's spawn provider does, and restart. */
+async function withAssessors(assessors = 1): Promise<AssessorTestRun[]> {
+  const runs: AssessorTestRun[] = []
+  services.subagents = { startActivation: vi.fn(async (spec: AssessorTestRun['spec']) => {
+    await (controller.create as (options: { sessionId: string; agentPreset: string }) => Promise<void>)({ sessionId: spec.childId, agentPreset: spec.request.agentPreset })
+    const child = agents.get(spec.childId)! as unknown as { session: { header: Record<string, unknown> } }
+    child.session.header = { ...child.session.header, origin: 'subagent', parentSession: spec.request.parent.id }
+    await (runtime as unknown as { ctx: Context }).ctx.parallel('agent/created', { agent: child } as never)
+    const done = Promise.withResolvers<{ stopReason: string }>()
+    const dispose = vi.fn(async () => { done.resolve({ stopReason: 'cancelled' }) })
+    runs.push({ spec, finish: stopReason => { done.resolve({ stopReason }) }, dispose })
+    return { childId: spec.childId, result: done.promise, dispose }
+  }) }
+  await restart()
+  await runtime.ready
+  runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
+  await runtime.settings.save('eval', { ...runtime.store.settings().eval, mode: 'auto', assessors }, runtime.store.blockRevision('eval'), 'panel')
+  deliveries.mockClear()
+  return runs
+}
+const copyDecision = (id: string) => ({ trigger_id: id, decision: 'accept', title: '文案修订', worktree_name: 'copy-fix', scope: '改副标题', reason: 'explicit copy change',
+  intent_evidence: 'quoted', acknowledgement: '收到，把副标题改成“浏览网页”。',
+  rule_assessments: [{ rule_id: 'copy', matched: true, reason: 'copy change' }, { rule_id: 'visual', matched: false, reason: 'not visual' }],
+  direction: { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'the message names the replacement' } })
+
+it('has an assessor subagent of the main Session assess a proactive candidate, and tells the main Session what it accepted', async () => {
+  const runs = await withAssessors()
+  // The main Session no longer assesses: its prompt has neither the admission rules nor the Policy section.
+  const main = sections.get(runtime.masterId)!.text({})
+  expect([main.includes('Assess proactive candidates yourself'), main.includes('## Policy')]).toEqual([false, false])
+  // A run holds its effect until it ends, so the test waits for what it needs instead of an idle runtime.
+  const trigger = feishu('3', '这个文案好奇怪，改成“浏览网页”吧', { mentions: [] })
+  runtime.receive(trigger)
+  await vi.waitFor(() => expect(runs).toHaveLength(1))
+  const [run] = runs, child = run!.spec.childId
+  expect(run!.spec).toMatchObject({ provider: 'spawn', delivery: 'caller', childId: expect.stringMatching(/^assessor-/),
+    request: { parent: expect.objectContaining({ id: runtime.masterId }), agentPreset: 'dsh-superagent-assessor' } })
+  expect(JSON.parse(run!.spec.request.prompt[0]!.text)).toMatchObject({ kind: 'candidate', trigger_id: trigger.id, strength: 'inferred' })
+  expect(relays(runtime.masterId).filter(item => item.kind === 'candidate')).toEqual([])
+  // The subagent has the eval tools for its own candidate, and a prompt of the assessor, the admission rules and the Policy.
+  expect([...tools.get(child)!.keys()].sort()).toEqual(['orchestrator_eval', 'orchestrator_eval_decide', 'orchestrator_eval_read'])
+  expect(restricts.get(child)).toEqual([{ allow: [] }])
+  const prompt = sections.get(child)!.text({})
+  for (const part of ['You are an assessor', 'Assess proactive candidates yourself', '## Policy']) expect(prompt).toContain(part)
+  // Its tools run while the run is open, so they are called without waiting for an idle runtime.
+  const call = async (name: string, args: unknown) => await tools.get(child)!.get(name)!.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
+  await expect(call('orchestrator_eval', { trigger_id: 'another' })).rejects.toThrow(`You assess trigger ${trigger.id} only`)
+  vi.spyOn(Commands.prototype, 'lark').mockResolvedValue({ items: [{ message_id: 'om_3', chat_id: CHAT }] })
+  await call('orchestrator_eval', { trigger_id: trigger.id })
+  const accepted = await call('orchestrator_eval_decide', copyDecision(trigger.id))
+  expect(accepted).toMatchObject({ decision: 'accept', ticket: { ticket_id: expect.any(String) } })
+  // The run ends and is released; the main Session hears of the ticket at its next turn, without being woken.
+  run!.finish('completed')
+  await vi.waitFor(() => expect(run!.dispose).toHaveBeenCalled())
+  await runtime.idle()
+  expect(relays(runtime.masterId)).toEqual([])
+  expect(heard(runtime.masterId).find(item => 'proactive_ticket' in item)).toMatchObject({ trigger_id: trigger.id,
+    proactive_ticket: expect.objectContaining({ ticket_id: (accepted.ticket as { ticket_id: string }).ticket_id }) })
+  expect(runtime.store.decisions.byThread(`feishu:${CHAT}:om_3`).map(decision => decision.kind)).toEqual(['accept'])
+  // An explicit request still reaches the main Session as a candidate.
+  const explicit = feishu('4', '@bot 修一下回归', { root_id: undefined })
+  await receive(explicit)
+  expect(relays(runtime.masterId)).toEqual([expect.objectContaining({ kind: 'candidate', trigger_id: explicit.id, strength: 'explicit' })])
+  expect(runs).toHaveLength(1)
+})
+
+it('records an Eval unavailable when its assessor subagent ends without a decision, or when no subagent service is mounted', async () => {
+  const runs = await withAssessors()
+  const trigger = feishu('3', '这个文案好奇怪，改成“浏览网页”吧', { mentions: [] })
+  runtime.receive(trigger)
+  await vi.waitFor(() => expect(runs).toHaveLength(1))
+  runs[0]!.finish('completed')
+  const decided = () => runtime.store.decisions.byThread(`feishu:${CHAT}:om_3`)
+  await vi.waitFor(() => expect(decided().map(decision => decision.kind)).toEqual(['unavailable']))
+  expect(decided()[0]!.reason).toEqual([{ code: 'assessorUndecided', values: { stop: 'completed' } }])
+  expect(runs[0]!.dispose).toHaveBeenCalled()
+  delete services.subagents
+  await restart(); await runtime.ready
+  runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
+  const again = feishu('5', '把副标题改成“浏览网页”', { mentions: [] })
+  await receive(again)
+  await vi.waitFor(() => expect(runtime.store.decisions.byThread(`feishu:${CHAT}:om_5`).map(decision => decision.reason)).toEqual([[{ code: 'noAssessor' }]]))
+})
+
 it('accepts silently under a rule that says so, gives the worker the rule procedure, and closes it as dropped when nothing is left for a human', async () => {
   const policy = runtime.store.settings().policy
   await runtime.settings.save('policy', { ...policy, rules: [...policy.rules, { id: 'silent-bugfix', name: '沉默地复现和修复', enabled: true, instruction: 'Reproduce minimally first; accept silently.' }] }, runtime.store.blockRevision('policy'), 'panel')

@@ -191,3 +191,16 @@
                   thresholdChars: 8192
                   headChars: 4096
                   tailChars: 1024
+    # The agent preset of every assessor subagent (ASSESSOR_PRESET in src/app/assessment.ts): a child of the main Session that
+    # assesses one proactive candidate while the eval settings' assessors is above 0. Its eval tools are dsh-superagent's and
+    # its prompt is complete, so it has the time and nothing else: no persona, shell, files, subagents or compaction.
+    - id: dsh-superagent-assessor-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: dsh-superagent-assessor
+        name: dsh-superagent 研判子代理
+        description: dsh-superagent 研判子代理专用，不供手动选择。只研判一个主动候选，只含研判所需的工具。
+        order: 92
+        plugins:
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'

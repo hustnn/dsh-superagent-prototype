@@ -40,6 +40,7 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
     get engine() { return engine }, commands, deployment: testDeployment(), settings: () => SettingsSchema.parse({}),
     threadContext: threadContext ?? (trigger => sources.threadContext(trigger)),
     effects: { enqueue: () => {}, handle: () => {} }, paused: () => false, deliver: async () => {}, candidateCard: async candidate => ({ eval_id: candidate.evalId }),
+    subagents: () => undefined, parent: async () => { throw new Error('No main Session in this test') },
   }
   const assessor = new MasterAssessor(host)
   const policy: Policy = { version: 'v1', paused: false, evalTimeoutMs: 600_000, gate: () => ({ admissible: true, strength, basis: { via: 'followup' } }),

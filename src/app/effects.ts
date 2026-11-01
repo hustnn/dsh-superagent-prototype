@@ -11,6 +11,8 @@ import type { Store } from './store.ts'
 export interface EffectPayloads {
   /** Build an Eval's candidate card and relay it to the main Session; the key is the Eval ID. */
   assessment: { triggerId: string }
+  /** Have an assessor subagent of the main Session assess an Eval's proactive candidate; the key is the Eval ID. */
+  assessor: { triggerId: string }
   /** Launch a pending Assignment; the key is the Assignment ID. */
   launch: { ticketId: string; assignmentId: string }
   /** Hand a ticket's waiting Inputs to its running Assignment; the key is the Ticket ID. */
