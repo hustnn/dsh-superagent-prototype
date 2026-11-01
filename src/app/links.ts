@@ -8,9 +8,11 @@ import { triggerMessage } from '../executor/dsh.ts'
 import { relatedTickets, ticketCard, triggerCard } from './cards.ts'
 import type { Store } from './store.ts'
 import type { TextCache } from './cache.ts'
+import type { Ledger } from './ledger.ts'
 
 export interface LinkHost {
   readonly store: Pick<Store, 'settings' | 'triggers' | 'threads' | 'tickets'>
+  readonly ledger: Pick<Ledger, 'search'>
   readonly links: TextCache
   readonly commands: Commands
   readonly sources: SourceRegistry
@@ -51,12 +53,23 @@ function referencedTickets(host: LinkHost, trigger: Trigger, known: readonly Tic
   for (const ticket of known) ids.delete(ticket.id)
   return [...ids].flatMap(id => host.store.tickets.get(id) ?? []).slice(0, 4)
 }
-/** Builds the main Session's candidate card with routing metadata, handback history, and related or referenced tickets. */
+/**
+ * Other tickets whose words a trigger shares, at least two of them, as leads for the main Session to look at: never pointers
+ * that justify an attach on their own.
+ */
+function similarTickets(host: LinkHost, trigger: Trigger, known: readonly Ticket[]) {
+  return host.ledger.search(trigger.text, { least: 2, limit: 3, exclude: known.map(ticket => ticket.id) }).flatMap(hit => {
+    const ticket = host.store.tickets.get(hit.ticketId)
+    return ticket ? [{ ticket_id: ticket.id, title: ticket.title, state: ticketCard(ticket).state, at: hit.at }] : []
+  })
+}
+/** Builds the main Session's candidate card with routing metadata, handback history, and related, referenced or similar tickets. */
 export async function candidateCard(host: LinkHost, candidate: Candidate) {
   const primary = candidate.triggers.at(-1)!
   const settings = host.store.settings()
   const delivered = host.store.triggers.disposition(primary.id)?.fanout ?? []
   const referenced = referencedTickets(host, primary, candidate.tickets)
+  const similar = similarTickets(host, primary, [...candidate.tickets, ...referenced])
   // Triggers that a worker Session handed back as outside its ticket's scope, with the worker's reason.
   const handedBack = candidate.triggers.flatMap(trigger => (host.store.triggers.disposition(trigger.id)?.handbacks ?? [])
     .map(item => ({ trigger_id: trigger.id, ticket_id: item.ticketId, reason: item.reason })))
@@ -66,6 +79,7 @@ export async function candidateCard(host: LinkHost, candidate: Candidate) {
     mode: settings.eval.mode, ...others.length ? { batch: others.map(trigger => triggerCard(trigger)) } : {},
     ...handedBack.length ? { handed_back: handedBack } : {}, ...relatedTickets(candidate.tickets),
     ...(delivered.length ? { delivered_to: delivered } : {}), ...(referenced.length ? { referenced_tickets: referenced.map(ticketCard) } : {}),
+    ...(similar.length ? { similar_tickets: similar } : {}),
     next_action: candidate.strength === 'explicit' ? 'Route it with orchestrator_route as dispatch says: accept, attach, stop or ignore.'
       : 'Ignore it with orchestrator_route if the card shows it touches no enabled rule; else assess it with orchestrator_eval, orchestrator_eval_read, then orchestrator_eval_decide.' }
 }

@@ -1610,6 +1610,29 @@ it('holds a ticket on a person\'s message: its worker reads and answers but chan
   expect(sections.get(sessionId)!.text({})).not.toContain('## Hold')
 })
 
+it('finds earlier work by its words: a candidate card names similar tickets, and orchestrator_recall finds one by its memo', async () => {
+  const { ticket, sessionId } = await acceptedTicket(feishu('1', '@bot 暗色模式下表格行高太高'))
+  await runTool(sessionId, 'orchestrator_report', { state: 'dropped', summary: 'Already fixed upstream.',
+    memo: { summary: 'Table rows in dark mode were already fixed upstream.', keywords: ['dark mode', '暗色模式', 'table'] } })
+  expect(runtime.store.tickets.get(ticket.id)!.ended).toMatchObject({ outcome: 'dropped' })
+  deliveries.mockClear()
+  // A new request in another conversation shares two of its words: its card names the earlier ticket as a lead.
+  const again = feishu('5', '@bot 暗色模式的表格又错位了', { root_id: undefined })
+  await receive(again)
+  const card = relays(runtime.masterId).find(item => item.kind === 'candidate' && item.trigger_id === again.id)!
+  expect(card.similar_tickets).toEqual([{ ticket_id: ticket.id, title: '修复回归', state: 'dropped', at: expect.any(String) }])
+  // One that shares a single word names none.
+  const other = feishu('6', '@bot 登录页的表格太宽', { root_id: undefined })
+  await receive(other)
+  expect(relays(runtime.masterId).find(item => item.kind === 'candidate' && item.trigger_id === other.id)).not.toHaveProperty('similar_tickets')
+  // English finds the Chinese ticket by its memo's keywords; a day filter and a state filter narrow the search.
+  expect(await runTool(runtime.masterId, 'orchestrator_recall', { query: 'dark mode table' })).toEqual({ next_offset: null,
+    items: [expect.objectContaining({ ticket_id: ticket.id, state: 'dropped', matched: ['dark', 'mode', 'table'], read: `ticket/${ticket.id}` })] })
+  expect(await runTool(runtime.masterId, 'orchestrator_recall', { query: 'dark mode', state: 'open' })).toEqual({ items: [], next_offset: null })
+  expect(await runTool(runtime.masterId, 'orchestrator_recall', { query: 'dark mode', since: '2999-01-01' })).toEqual({ items: [], next_offset: null })
+  await expect(runTool(runtime.masterId, 'orchestrator_recall', { query: 'dark mode', since: 'last month' })).rejects.toThrow()
+})
+
 it('lets a worker escalate a person\'s message that asks to stop, wait or go on in other words, which wakes the main Session', async () => {
   const { ticket, sessionId } = await acceptedTicket()
   deliveries.mockClear()
