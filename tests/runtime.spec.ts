@@ -22,7 +22,7 @@ import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind, pollRound } from '../src/sources/github.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
-import { UserError, key, runningAssignment, said, threadKey, waitsForPerson, type Trigger } from '../src/core/index.ts'
+import { UserError, key, runningAssignment, said, threadKey, ticketStage, waitsForPerson, type Trigger } from '../src/core/index.ts'
 import { feishuTrigger } from '../src/sources/feishu.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { commentTrigger, githubChannel } from '../src/sources/github-trigger.ts'
@@ -114,6 +114,11 @@ let deliveries: ReturnType<typeof vi.fn<(request: { sessionId: string; mode: 'qu
 const relays = (sessionId: string) => deliveries.mock.calls.map(([call]) => call).filter(call => call.sessionId === sessionId).map(call => {
   try { return JSON.parse(call.text) as Record<string, unknown> } catch { return { text: call.text } as Record<string, unknown> }
 })
+/** Every payload a Session heard of: what woke it, and the notices injected for its next turn without waking it. */
+const heard = (sessionId: string) => [...relays(sessionId), ...(agents.get(sessionId)?.inject.mock.calls ?? []).map(([message]) => {
+  const text = (message as UserMessage).content.map(block => block.type === 'text' ? block.text : '').join('')
+  try { return JSON.parse(text) as Record<string, unknown> } catch { return { text } as Record<string, unknown> }
+})]
 const MEMBER = 'ou_alice'
 const CHAT = 'oc_team'
 function feishu(id: string, text: string, overrides: Record<string, unknown> = {}): Trigger {
@@ -128,7 +133,7 @@ async function route(item: Record<string, unknown>): Promise<Record<string, unkn
 }
 async function acceptedTicket(trigger = feishu('1', '@bot 修一下回归')) {
   await receive(trigger)
-  expect(relays(runtime.masterId).some(item => item.trigger_id === trigger.id)).toBe(true)
+  expect(heard(runtime.masterId).some(item => item.trigger_id === trigger.id)).toBe(true)
   const result = await route({ kind: 'accept', trigger_id: trigger.id, title: '修复回归',
     worktree_name: worktreeName, acknowledgement: '收到，修复回归。' })
   const ticket = runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!
@@ -254,8 +259,10 @@ it('fans a person\'s later thread message out to the live worker as context and 
   expect(JSON.parse(((await runTool(sessionId, 'orchestrator_read', { resource })) as { text: string }).text)).toEqual(worker[0])
   expect(runtime.store.get(resource)).toBeUndefined()
   expect(runtime.store.tickets.get(ticket.id)!.inputs).toEqual([expect.objectContaining({ kind: 'trigger', triggerId: followup.id })])
-  expect(relays(runtime.masterId)).toEqual([{ kind: 'follow_up', trigger_id: followup.id, from: 'ou_guest', thread: `feishu:${CHAT}:om_1`,
-    at: followup.at, text: '顺便看看日志', delivered_to: [{ ticket_id: ticket.id, title: '修复回归', state: 'working' }],
+  // Its words ask for no stop, hold or release: the main Session reads it at its next turn, and is not woken for it.
+  expect(relays(runtime.masterId)).toEqual([])
+  expect(heard(runtime.masterId).filter(item => item.kind === 'follow_up')).toEqual([{ kind: 'follow_up', trigger_id: followup.id, from: 'ou_guest',
+    thread: `feishu:${CHAT}:om_1`, at: followup.at, text: '顺便看看日志', delivered_to: [{ ticket_id: ticket.id, title: '修复回归', state: 'working' }],
       note: expect.stringContaining('worker has it and decides') }])
   expect(runtime.store.decisions.byThread(`feishu:${CHAT}:om_1`).map(decision => decision.triggerIds)).toEqual([[ticket.origin.triggerId]])
   expect(await runTool(sessionId, 'orchestrator_read', { resource: `trigger/${followup.id}` }))
@@ -1553,6 +1560,73 @@ it('reads the main Session\'s preset from a registry with or without presetForSe
   main = await guard({ select: vi.fn(), presetForSession: () => { throw new Error('no projection') } })
   expect(main(route)).toBeUndefined()
   expect(main(watch)).toMatch(/^This shell waits up to 60 seconds by default/)
+})
+
+it('holds a ticket on a person\'s message: its worker reads and answers but changes and sends nothing until a person lifts the hold',
+  async () => {
+  const { ticket, sessionId } = await acceptedTicket()
+  const ctx = (runtime as unknown as { ctx: Context }).ctx
+  deliveries.mockClear()
+  // Words that may ask to wait wake the main Session, which holds the ticket and tells the person it waits.
+  const wait = feishu('2', '先等等，等产品确认了再改', { mentions: [], root_id: 'om_1' })
+  await receive(wait)
+  expect(relays(runtime.masterId)).toEqual([expect.objectContaining({ kind: 'follow_up', trigger_id: wait.id })])
+  expect(await route({ kind: 'hold', ticket_id: ticket.id, trigger_id: wait.id, acknowledgement: '好的，等你确认后再继续。' }))
+    .toMatchObject({ decision: 'hold', ticket: expect.objectContaining({ state: 'person/hold', hold: expect.objectContaining({ by: 'person' }) }) })
+  const held = runtime.store.tickets.get(ticket.id)!
+  expect(held.hold).toMatchObject({ by: 'person', triggerId: wait.id, reason: 'Human asked to wait' })
+  expect(ticketStage(held)).toEqual({ stage: 'person', action: 'hold' })
+  expect(runtime.store.replyStatus(key('ack', wait.id))).toBeDefined()
+  // Every model request of its worker reads the hold afresh, and its guard refuses changes and outward commands.
+  expect(sections.get(sessionId)!.text({})).toContain('## Hold\nA person put this ticket on hold (Human asked to wait).')
+  const guard = guards.get(sessionId)!
+  for (const call of [{ name: 'edit', arguments: {} }, { name: 'write', arguments: {} }, { name: 'bash', arguments: { command: 'git push origin HEAD' } },
+    { name: 'bash', arguments: { command: 'git -C ../x commit -m wip' } }, { name: 'bash', arguments: { command: 'gh pr comment 12 --body hi' } },
+    { name: 'bash', arguments: { command: 'gh api repos/acme/widgets/issues/1/comments -f body=hi' } },
+    { name: 'bash', arguments: { command: 'lark-cli im +messages-reply --message-id om_1' } }]) expect(guard(call), call.name).toContain('on hold')
+  for (const call of [{ name: 'read', arguments: { path: 'a.ts' } }, { name: 'bash', arguments: { command: 'git log --oneline && git show HEAD:merge.ts' } },
+    { name: 'bash', arguments: { command: 'gh pr view 12 --comments' } }, { name: 'bash', arguments: { command: 'gh api repos/acme/widgets/pulls/12' } }]) {
+    expect(guard(call), String((call.arguments as { command?: string }).command ?? call.name)).toBeUndefined()
+  }
+  await expect(runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'done' })).rejects.toThrow('on hold')
+  await expect(runTool(sessionId, 'orchestrator_ack', { trigger_id: wait.id, text: '收到' })).rejects.toThrow('on hold')
+  expect(await runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'waiting for product' })).toMatchObject({ reported: true })
+  // A person who types into the worker's Session after the hold drives it as they choose.
+  ctx.emit('session/event', { id: sessionId } as never, { type: 'user/message', data: { source: { kind: 'user' } }, time: Date.now() + 1000 } as never)
+  expect(guard({ name: 'edit', arguments: {} })).toBeUndefined()
+  ctx.emit('session/event', { id: sessionId } as never, { type: 'user/message', data: { source: { kind: 'dsh-superagent' } }, time: Date.now() + 2000 } as never)
+  expect(guard({ name: 'edit', arguments: {} })).toContain('on hold')
+  // A guest cannot lift it; a person on the list can, and the worker hears it may go on.
+  const guest = feishu('3', '继续吧', { mentions: [], root_id: 'om_1', sender_id: 'ou_guest' })
+  await receive(guest)
+  expect(await route({ kind: 'release', ticket_id: ticket.id, trigger_id: guest.id })).toMatchObject({ decision: 'ignore', reason: expect.stringContaining('explicit request') })
+  const go = feishu('4', '产品确认了，可以继续', { mentions: [], root_id: 'om_1' })
+  await receive(go)
+  deliveries.mockClear()
+  expect(await route({ kind: 'release', ticket_id: ticket.id, trigger_id: go.id })).toMatchObject({ decision: 'release' })
+  expect(runtime.store.tickets.get(ticket.id)!.hold).toBeUndefined()
+  await vi.waitFor(() => expect(relays(sessionId).some(item => String(item.text).includes('lifted the hold'))).toBe(true))
+  expect(guard({ name: 'edit', arguments: {} })).toBeUndefined()
+  expect(sections.get(sessionId)!.text({})).not.toContain('## Hold')
+})
+
+it('lets a worker escalate a person\'s message that asks to stop, wait or go on in other words, which wakes the main Session', async () => {
+  const { ticket, sessionId } = await acceptedTicket()
+  deliveries.mockClear()
+  const aside = feishu('2', '这个先放一放', { mentions: [], root_id: 'om_1' })
+  await receive(aside)
+  expect(relays(runtime.masterId)).toEqual([])
+  expect(await runTool(sessionId, 'orchestrator_escalate', { trigger_id: aside.id, ask: 'hold', reason: 'Asks to put the change aside.' }))
+    .toEqual({ escalated: true, trigger_id: aside.id, ask: 'hold' })
+  expect(relays(runtime.masterId)).toEqual([expect.objectContaining({ kind: 'escalation', trigger_id: aside.id, ask: 'hold',
+    ticket: expect.objectContaining({ ticket_id: ticket.id }), note: expect.stringContaining('orchestrator_route kind hold') })])
+  await expect(runTool(sessionId, 'orchestrator_escalate', { trigger_id: 'unknown', ask: 'stop', reason: 'x' })).rejects.toThrow('Unknown trigger')
+  // The main Session decides it as it decides a follow-up; once decided, a second escalation of it relays nothing.
+  expect(await route({ kind: 'hold', ticket_id: ticket.id, trigger_id: aside.id })).toMatchObject({ decision: 'hold' })
+  deliveries.mockClear()
+  expect(await runTool(sessionId, 'orchestrator_escalate', { trigger_id: aside.id, ask: 'hold', reason: 'Asks to put the change aside.' }))
+    .toEqual({ escalated: false, trigger_id: aside.id, decided: 'hold' })
+  expect(relays(runtime.masterId)).toEqual([])
 })
 
 it('refuses an ended ticket\'s worker its tools, and restricts the main Session to the tools it may use', async () => {

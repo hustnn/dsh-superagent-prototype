@@ -42,8 +42,8 @@ export const subscriptionNotice = (thread: string, at?: string): Notice => [`sub
   { subscription_changes: [{ thread, removed: true }], ...at ? { at } : {} }, `Removed the subscriptions on thread ${thread}`]
 
 /**
- * Converts an unsolicited domain event into a main-Session notice (`ticket.ended`, `trigger.requeued`, or
- * `thread.unsubscribed` by a person or executor); returns `undefined` for events that require no notice.
+ * Converts an unsolicited domain event into a main-Session notice (`ticket.ended`, `trigger.requeued`, `thread.unsubscribed`
+ * by a person or executor, or a hold placed or lifted in the panel); returns `undefined` for events that require no notice.
  */
 export function eventNotice(event: DomainEvent, ticket: (id: string) => Ticket | undefined = () => undefined): Notice | undefined {
   const { at } = event
@@ -55,6 +55,13 @@ export function eventNotice(event: DomainEvent, ticket: (id: string) => Ticket |
   if (event.type === 'trigger.requeued') {
     const id = event.data.triggerId
     return receiptNotice({ trigger_requeued: id, read: `trigger/${id}`, at }, `Trigger ${id} queued for a fresh assessment`)
+  }
+  // A hold the main Session decided on a person's message is its own; one from the panel it hears of.
+  if ((event.type === 'ticket.held' || event.type === 'ticket.released') && event.data.by === 'panel') {
+    const { ticketId } = event.data, current = ticket(ticketId)
+    const value = current ? brief(current) : ticketId
+    return event.type === 'ticket.held' ? receiptNotice({ ticket_held: value, at }, `A person put ticket ${ticketId} on hold in the panel`)
+      : receiptNotice({ ticket_released: value, at }, `A person lifted the hold on ticket ${ticketId} in the panel`)
   }
   if (event.type === 'thread.unsubscribed' && event.data.by === 'person') return subscriptionNotice(event.data.threadKey, at)
   if (event.type === 'thread.unsubscribed') {
@@ -75,15 +82,20 @@ export const threadFollowedNotice = (ticketId: string, thread: string, reason: s
 
 /** Steering relay payload for the main Session: `id` is the request ID that makes delivery idempotent, and `text` is the message body. */
 export interface Relay { id: string; text: string }
-/** What a follow-up asks of the main Session: nothing but a stop the person asks for, since its ticket's worker decides it. */
-const FOLLOWUP_NOTE = 'Its ticket\'s worker has it and decides; act only if the person asks to stop the work '
-  + '(orchestrator_route kind stop with this trigger_id).'
+/** What a follow-up asks of the main Session: nothing but a stop, a hold or a release the person asks for, since its ticket's worker decides it. */
+const FOLLOWUP_NOTE = 'Its ticket\'s worker has it and decides; act only if the person asks to stop the work, or to wait or go on '
+  + '(orchestrator_route kind stop, hold or release with this trigger_id).'
 /**
- * Builds a steering relay for a human follow-up trigger that reached at least one live ticket (including an ended ticket
- * that resumed on the follow-up), with the trigger rendered as workers read it, the replied-to message, and the open
- * tickets it reached; returns `undefined` while no ticket's worker decides it (see `followupOwners`) or it reached no live ticket.
+ * Words with which a person may ask to stop a ticket, have it wait, or go on. A follow-up with one wakes the main Session,
+ * which alone decides those; any other reaches it as a notice it reads at its next turn, since the ticket's worker decides it.
  */
-export function followupNotice(store: Store, sources: SourceRegistry, triggerId: string): Relay | undefined {
+const CONTROL_WORDS = /停|先别|别做|不用了|取消|等等|等一下|先等|继续|可以了|接着做|\b(?:stop|hold|wait|pause|cancel|resume|go ahead|continue)\b/i
+/**
+ * Builds the follow-up for a human trigger that reached at least one live ticket (including an ended ticket that resumed on
+ * the follow-up), with the trigger rendered as workers read it, the replied-to message, and the open tickets it reached;
+ * returns `undefined` while no ticket's worker decides it (see `followupOwners`) or it reached no live ticket.
+ */
+export function followupNotice(store: Store, sources: SourceRegistry, triggerId: string): Followup | undefined {
   const trigger = store.triggers.get(triggerId)
   const disposition = store.triggers.disposition(triggerId)
   if (!trigger || !followupOwners(trigger, store).length) return undefined
@@ -96,13 +108,30 @@ export function followupNotice(store: Store, sources: SourceRegistry, triggerId:
   return followupRelay(triggerMessage(trigger, {}, undefined, repliedTo({ store, sources }, trigger)), tickets)
 }
 /**
- * A person's message that reached tickets, as the main Session hears of it: the message as their workers read it, and the
- * tickets it reached with their state. Their workers decide it; the main Session may only stop the work on it.
+ * A follow-up for the main Session: a relay that wakes it (`wake`) when the person's words may ask to stop, hold or release,
+ * else a notice under the relay's `id`, with `value` and `summary`, that it reads at its next turn.
  */
-export function followupRelay(message: { trigger_id: string },
-  tickets: readonly { ticket_id: string; title: string; state: string; context?: boolean }[]): Relay {
-  return { id: `followup:${message.trigger_id}`, text: JSON.stringify({ kind: 'follow_up', ...message, delivered_to: tickets,
-    note: FOLLOWUP_NOTE }) }
+export interface Followup extends Relay { value: Record<string, unknown>; summary: string; wake: boolean }
+/**
+ * A person's message that reached tickets, as the main Session hears of it: the message as their workers read it, and the
+ * tickets it reached with their state. Their workers decide it; the main Session may only stop, hold or release the work on it.
+ */
+export function followupRelay(message: { trigger_id: string; text?: string },
+  tickets: readonly { ticket_id: string; title: string; state: string; context?: boolean }[]): Followup {
+  const value = { kind: 'follow_up', ...message, delivered_to: tickets, note: FOLLOWUP_NOTE }
+  return { id: `followup:${message.trigger_id}`, text: JSON.stringify(value), value, wake: CONTROL_WORDS.test(message.text ?? ''),
+    summary: `A person's message reached ticket ${tickets.map(ticket => ticket.ticket_id).join(', ')}` }
+}
+/** What a worker reads a person's message as asking of its ticket, in the escalation it relays. */
+const ASKS = { stop: 'stop the work', hold: 'wait', release: 'go on after a hold' } as const
+/**
+ * A worker's escalation of a person's message on its ticket's threads that may ask to stop the ticket, have it wait, or go
+ * on, which only the main Session decides: it wakes the main Session at once, whether or not the words were ones it knows.
+ */
+export function escalationRelay(ticket: Ticket, message: { trigger_id: string }, ask: keyof typeof ASKS, reason: string): Relay {
+  return { id: `escalation:${ticket.id}:${message.trigger_id}:${ask}`, text: JSON.stringify({ kind: 'escalation', ticket: brief(ticket), ...message,
+    ask, reason, note: `Its worker reads this message as asking to ${ASKS[ask]}; if the person asks that, route it with orchestrator_route `
+      + `kind ${ask} and this trigger_id, else leave it.` }) }
 }
 /** Formats a worker report relay for the main Session (truncating summaries over 600 characters behind `ticket/<id>/result`); `replyTo` names the human question trigger it answers. */
 export function resultRelay(ticket: Ticket, state: string, text: string, replyTo?: string): Relay {

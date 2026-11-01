@@ -35,7 +35,8 @@ const SHUTDOWN_STOP_MS = 10_000
 /** How long a worker that goes on after a passing failure waits for a worker slot, or for processing to resume, between looks. */
 const SLOT_WAIT_MS = 5000
 /** True when an input comes from a person (a non-context human trigger or a direct text input such as a status request). */
-const fromPerson = (input?: TicketInput): boolean => input?.kind === 'trigger' ? !!input.human && !input.context : input?.kind === 'text'
+const fromPerson = (input?: TicketInput): boolean => input?.kind === 'trigger' ? !!input.human && !input.context
+  : input?.kind === 'text' || input?.kind === 'released'
 /**
  * Internal error thrown when a ticket's workspace prepare command fails during launch.
  * DshExecutor catches it to mark the ticket failed immediately rather than retrying automatically, because an existing directory counts as prepared and an automatic retry would treat whatever a failed prepare command left behind in the directory as a prepared workspace.
@@ -93,6 +94,16 @@ export function mandateInstructions(mandate: Pick<Mandate, 'strength'>): string 
     + 'internal to one module within the accepted rule scope. If it requires public-interface or behavior changes, new interaction, product '
     + 'decisions or clarification, stop and report dropped; do not expand scope.' : ''
 }
+/**
+ * Returns the Hold section of the worker prompt of a ticket a person put on hold, which every model request reads afresh, so
+ * the hold outlives compaction and restarts; returns `''` for a ticket that is not on hold.
+ */
+export function holdInstructions(ticket: Pick<Ticket, 'hold'>): string {
+  const { hold } = ticket
+  return hold ? `\n## Hold\nA person put this ticket on hold (${hold.reason}). Until a person lifts it, do not edit files, commit, push, post `
+    + 'or acknowledge new work; read, answer questions and report progress. Only a person lifts a hold: when one asks you to go on, '
+    + 'call orchestrator_escalate with ask release.' : ''
+}
 /** Builds a newly accepted ticket's Execution metadata: its worktree name, workspace directory, and assignment text. */
 export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>, settings: Settings,
   stateDir: string): Execution {
@@ -133,6 +144,8 @@ const RESUMED = 'This ticket ended earlier and the message that follows, on its 
   + 'more within the original scope, inspect the worktree, git history and PR state and continue; if it asks for work beyond that scope or '
   + 'for another ticket, hand it back with orchestrator_trigger_handback and report dropped; if it needs nothing, such as thanks, '
   + 'report dropped without a message. Report ready when the follow-up is done. Do not repeat completed work.'
+const RELEASED = 'A person lifted the hold on this ticket. Look at what reached it meanwhile, such as CI, reviews and its PR, and go on '
+  + 'with the assignment.'
 const RETRIED = 'A person retried this ticket. Continue the assignment from the current worktree, git history and PR state.'
 /** Formats a policy-change input for the worker; inputs recorded before `effect` existed fall back to a general notice. */
 function policyMessage(effect?: PolicyEffect): string {
@@ -159,6 +172,7 @@ export function inputMessage(input: TicketInput, trigger?: object): string | und
     ...input.context ? { context: true } : {} })
   if (input.kind === 'policy-changed') return policyMessage(input.effect)
   if (input.kind === 'resumed') return RESUMED
+  if (input.kind === 'released') return RELEASED
   if (input.kind === 'note') return `Note from the orchestrator, for context only: ${input.text}`
   return input.kind === 'text' ? input.text : undefined
 }

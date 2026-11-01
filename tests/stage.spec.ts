@@ -6,6 +6,7 @@ const reported = (state: ReportState, overrides: Partial<Assignment> = {}) => as
 const ticket = (overrides: Partial<Ticket> = {}): Ticket => ({ id: 't', title: 'x', decisionId: 'd', mandate: { strength: 'explicit', policyVersion: 'v', basis: { via: 'listed' }, actor: { source: 'feishu', id: 'ou' }, scope: '' },
   channels: [], assignments: [assignment()], inputs: [], undelivered: [], createdAt: '', updatedAt: '', origin: { triggerId: 'x', triggerIds: ['x'] }, ...overrides })
 const attention = { id: 'q', question: '?' }
+const hold = { id: 'h', by: 'person' as const, reason: 'wait for product', triggerId: 'w', at: '' }
 /** A person's message that reached the Ticket after its report. */
 const answered = { inputs: [{ id: 'i', kind: 'trigger' as const, triggerId: 'e', at: 'later', human: true as const }] }
 const reportedAt = (state: ReportState) => reported(state, { report: { state, summary: '', at: 'earlier' } })
@@ -16,6 +17,9 @@ describe('ticketStage', () => {
   it.each([
     ['an undelivered Input', ticket({ delivery: { error: 'offline', at: '' } }), { stage: 'person', action: 'delivery' }],
     ['delivery before answer and review', ticket({ delivery: { error: 'offline', at: '' }, attention, assignments: [reported('ready')] }), { stage: 'person', action: 'delivery' }],
+    ['a person\'s hold', ticket({ hold }), { stage: 'person', action: 'hold' }],
+    ['delivery before a hold', ticket({ delivery: { error: 'offline', at: '' }, hold }), { stage: 'person', action: 'delivery' }],
+    ['a hold before an answer and a review', ticket({ hold, attention, assignments: [reported('ready')] }), { stage: 'person', action: 'hold' }],
     ['an Attention', ticket({ attention }), { stage: 'person', action: 'answer' }],
     ['answer before review', ticket({ attention, assignments: [reported('ready')] }), { stage: 'person', action: 'answer' }],
     ['answer before a failure', ticket({ attention, assignments: [reported('failed')] }), { stage: 'person', action: 'answer' }],

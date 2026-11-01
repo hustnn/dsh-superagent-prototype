@@ -70,7 +70,7 @@ export interface FollowupRecords {
  * and did not hand it back. A ticket can while it is live, also once a person dropped its Subscription to the Thread, and
  * while it is ended, not by a person, with the Trigger waiting to resume it. None once a person sent it to Eval, or while
  * an Eval holds it, which an earlier version may have queued. While a ticket owns it, the message goes to no Eval, and the
- * main Session may only stop the work on it.
+ * main Session may only stop, hold or release the work on it.
  */
 export function followupOwners(trigger: Pick<Trigger, 'id' | 'human' | 'threads'>, records: FollowupRecords): string[] {
   if (!trigger.human) return []
@@ -91,7 +91,8 @@ export function followupOwners(trigger: Pick<Trigger, 'id' | 'human' | 'threads'
  * work, routing it to a ticket leaves it to that ticket's worker, and an unavailable one decided nothing.
  */
 export const settled = (decision: Pick<Decision, 'kind' | 'reason'>): boolean => !['stop', 'unavailable'].includes(decision.kind)
-  && !decision.reason.some(reason => ['stopNotExplicit', 'stopUnknown', 'routed'].includes(reason.code))
+  && !decision.reason.some(reason => ['stopNotExplicit', 'stopUnknown', 'holdNotExplicit', 'holdUnknown', 'notHeld', 'routed']
+    .includes(reason.code))
 
 export type Strength = 'explicit' | 'inferred'
 /** The cells of a receiving scope's row in the admission table, by whether the sender is listed and addresses the agent. */
@@ -187,7 +188,7 @@ export interface ThreadFact { label?: Text; value: Text; problem?: true }
 /** A thread's facts by id, ordered for display; each writer owns its fact ids. */
 export type ThreadFacts = Record<string, ThreadFact>
 
-export type DecisionKind = 'ignore' | 'accept' | 'reopen' | 'stop' | 'unavailable'
+export type DecisionKind = 'ignore' | 'accept' | 'reopen' | 'stop' | 'hold' | 'release' | 'unavailable'
 /** Outcome of one eval, recorded on the thread. */
 export interface Decision {
   id: string
@@ -255,6 +256,8 @@ export type TicketInput =
   | { id: string; kind: 'text'; text: string; at: string }
   /** A fact the main Session gave the ticket from other work: context, which asks for nothing and grants nothing. */
   | { id: string; kind: 'note'; text: string; at: string }
+  /** A person lifted the ticket's hold, `holdId`: by a message the main Session decided, `triggerId`, or in the panel. */
+  | { id: string; kind: 'released'; holdId: string; by: Hold['by']; triggerId?: string; at: string }
 
 /**
  * How a Policy change bears on a ticket: the rules it was accepted under that changed, with their instruction now, or no
@@ -273,6 +276,12 @@ export type TicketEndBy = 'executor' | 'human'
 export type TicketOutcome = 'completed' | 'merged' | 'closed' | 'dropped' | 'stopped'
 /** A question for a person; `triggerId` is the human message that raised it, whose conversation it goes back to. */
 export interface Attention { id: string; question: string; triggerId?: string }
+/**
+ * A person's hold on a ticket: until a person lifts it, its worker reads and answers but changes and sends nothing, and the
+ * automatic Inputs wait. `by` says where it came from: a person's message the main Session decided (`person`, with
+ * `triggerId`), or the panel (`panel`).
+ */
+export interface Hold { id: string; by: 'person' | 'panel'; reason: string; triggerId?: string; at: string }
 /** Ticket aggregate: an authorized work item with its assignments, channels, thread bindings, and inputs. */
 export interface Ticket {
   id: string
@@ -285,6 +294,8 @@ export interface Ticket {
   ended?: { at: string; by: TicketEndBy; outcome: TicketOutcome; reason?: string }
   /** Open question for a person; cleared by the executor or when the ticket ends. */
   attention?: Attention
+  /** A person's hold, until a person lifts it or the ticket ends; see {@link Hold}. */
+  hold?: Hold
   assignments: Assignment[]
   inputs: TicketInput[]
   /** Inputs not yet handed to a running assignment. */

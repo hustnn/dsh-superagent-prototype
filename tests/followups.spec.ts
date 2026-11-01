@@ -9,7 +9,12 @@ afterEach(async () => { await h?.stop(); h = undefined })
 const THREAD = `feishu:${CHAT}:om_1`
 const followup = (id: string, text: string, overrides: Record<string, unknown> = {}) => feishu(id, text, { mentions: [], root_id: 'om_1',
   ...overrides })
-const notices = (host: Host) => host.relays(host.runtime.masterId).filter(item => item.kind === 'follow_up')
+/** The follow-ups that woke the main Session: those whose words may ask to stop, hold or release. */
+const woke = (host: Host) => host.relays(host.runtime.masterId).filter(item => item.kind === 'follow_up')
+/** Every follow-up the main Session heard of: those that woke it, and the notices it reads at its next turn. */
+const notices = (host: Host) => [...woke(host), ...host.agents.get(host.runtime.masterId)!.inject.mock.calls.map(([message]) =>
+  JSON.parse(message.content.map(block => block.type === 'text' ? block.text : '').join('')) as Record<string, unknown>)
+  .filter(item => item.kind === 'follow_up')]
 
 it('delivers a follow-up to the worker and tells the main Session with a card, without an Eval', async () => {
   h = await startRuntime()
@@ -24,6 +29,8 @@ it('delivers a follow-up to the worker and tells the main Session with a card, w
     replies_to: { trigger_id: ticket.origin.triggerId, preview: '@bot 修一下回归' },
     delivered_to: [{ ticket_id: ticket.id, title: ticket.title, state: 'working' }],
       note: expect.stringContaining('worker has it and decides') }])
+  // Its words ask for no stop, hold or release, so it waits for the main Session's next turn instead of waking it.
+  expect(woke(h)).toEqual([])
   // No candidate, no Eval, no Decision: nothing waits on the main Session, and the Thread's queue stays free.
   expect(h.candidates()).toEqual([])
   expect(h.runtime.store.threads.get(THREAD)).toMatchObject({ pending: [] })
@@ -100,7 +107,8 @@ function modelCalls(host: Host) {
   return () => seen.filter(status => status === 'idle').length + (seen.includes('running') ? 1 : 0)
 }
 
-it('costs the main Session one model call for a burst of follow-ups while it works, and two while it idles', async () => {
+it('costs the main Session no model call for follow-ups its workers decide, and one or two for a burst that may ask to stop, wait or go on',
+  async () => {
   for (const busy of [true, false]) {
     h = await startRuntime()
     await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
@@ -110,7 +118,11 @@ it('costs the main Session one model call for a burst of follow-ups while it wor
     const calls = modelCalls(h)
     for (const id of ['2', '3', '4', '5', '6']) h.runtime.receive(followup(id, `第 ${id} 条补充`, { sender_id: 'ou_guest' }))
     await h.runtime.idle()
-    expect([notices(h).length, h.candidates().length, calls()]).toEqual([5, 0, busy ? 1 : 2])
+    expect([notices(h).length, woke(h).length, h.candidates().length, calls()]).toEqual([5, 0, 0, 0])
+    // While it works, a burst that may ask to stop or wait goes into its next step; while it idles, the first starts a turn.
+    for (const id of ['7', '8', '9']) h.runtime.receive(followup(id, `第 ${id} 条：先等等`, { sender_id: 'ou_guest' }))
+    await h.runtime.idle()
+    expect([notices(h).length, woke(h).length, h.candidates().length, calls()]).toEqual([8, 3, 0, busy ? 1 : 2])
     await h.stop(); h = undefined
   }
 })
@@ -120,12 +132,13 @@ it('keeps a follow-up\'s notice in the effect queue until the main Session takes
   await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   h.deliveries.mockClear()
   h.agents.get(h.runtime.masterId)!.steer.mockImplementationOnce(() => { throw new Error('session gone') })
-  const message = followup('2', '补充一点')
+  // A follow-up that may ask to wait wakes the main Session, through the ordered relay queue.
+  const message = followup('2', '先等等，补充一点')
   h.runtime.receive(message)
   await h.runtime.idle()
   // The notice is stored with the intake's transaction, keyed by its Trigger, and a duplicate message adds nothing.
   expect(h.runtime.store.db.prepare("SELECT key FROM effect WHERE kind = 'relay'").all()).toEqual([{ key: `followup:${message.id}` }])
-  expect(h.runtime.receive(followup('2', '补充一点'))).toBe('duplicate')
+  expect(h.runtime.receive(followup('2', '先等等，补充一点'))).toBe('duplicate')
   vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 2000 })
   try { await h.runtime.pump(); await h.runtime.idle() } finally { vi.useRealTimers() }
   expect(notices(h).map(item => item.trigger_id)).toEqual([message.id])

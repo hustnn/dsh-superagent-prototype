@@ -9,7 +9,7 @@ import { EnginePart } from './part.ts'
 /**
  * A message for a Channel, by purpose: an Executor's acknowledgement of a person's request it works on, the answer to a
  * person's question once the worker reported it, the result of a ticket that is `ready`, `completed`, `merged`, or `dropped`,
- * or the ticket's current `question` for a person (`attention`). When `ticketId` is omitted, the ticket that `triggerId` reached is used.
+ * or the ticket's current `question` for a person (`attention`). A held ticket sends no acknowledgement and no result. When `ticketId` is omitted, the ticket that `triggerId` reached is used.
  */
 export type ReplyRequest =
   | { purpose: 'acknowledgement'; ticketId: string; triggerId: string; text: string }
@@ -37,10 +37,10 @@ export class Replies extends EnginePart {
     return request.purpose === 'acknowledgement' ? this.acknowledge(request) : this.answer(request)
   }
   /**
-   * Queue the acknowledgement an accept carries where the message that started the ticket was written, if it has a Channel
-   * and a person wrote it.
+   * Queue the acknowledgement an accept or a hold carries where the person's message it decided was written, if it has a
+   * Channel and a person wrote it: the message that started the ticket, or the one that put it on hold.
    */
-  acknowledgeAccepted(ticketId: string, trigger: Trigger, text: string): void {
+  acknowledgeDecided(ticketId: string, trigger: Trigger, text: string): void {
     if (trigger.channel && trigger.human) this.options.outbox.send({ id: key('ack', trigger.id), channel: trigger.channel, text, kind: 'acknowledgement', ticketId })
   }
   /** Withdraw a ticket's question for a person from the outbox, unless it went out already. */
@@ -48,6 +48,8 @@ export class Replies extends EnginePart {
   private acknowledge(request: Extract<ReplyRequest, { purpose: 'acknowledgement' }>): Reply {
     const ticket = this.require(request.ticketId)
     if (!liveTicket(ticket)) throw new UserError('ackEnded')
+    // A held ticket takes up no new work until a person lifts the hold.
+    if (ticket.hold) throw new UserError('ticketHeld', { reason: ticket.hold.reason })
     const trigger = this.repo.triggers.get(request.triggerId)
     if (!trigger) throw new UserError('unknownTrigger')
     // Context-only threads are read-only and cannot receive acknowledgements.
@@ -71,6 +73,7 @@ export class Replies extends EnginePart {
       const reported = !!ticket && liveTicket(ticket) && latestAssignment(ticket)?.report?.state === 'ready'
       const ready = outcome === 'merged' || outcome === 'completed' || outcome === 'dropped' || reported
       if (!ticket || !ready) throw new UserError('notReady')
+      if (ticket.hold) throw new UserError('ticketHeld', { reason: ticket.hold.reason })
     }
     const attention = request.purpose === 'attention' ? ticket?.attention : undefined
     // Attention replies must match the ticket's currently open question text.

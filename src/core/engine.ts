@@ -9,6 +9,7 @@ import { Evals, type Outcome } from './evals.ts'
 import { Intake, type ReceiveResult } from './intake.ts'
 import { Replies, type Reply, type ReplyRequest } from './replies.ts'
 import { Tickets } from './tickets.ts'
+import { reasonText } from './reasons.ts'
 
 export type { EngineOptions } from './part.ts'
 export type { WorkerReport } from './assignments.ts'
@@ -90,12 +91,12 @@ export class Engine {
   candidate(triggerId: string): Candidate | undefined { return this.evals.candidate(triggerId) }
   /**
    * Decide a Trigger: the Eval that holds it, or a direct Eval of it alone when none does, such as a person's explicit
-   * request the main Session routes. A proactive candidate is accepted only in `auto` mode with enabled rules its assessment
+   * request the main Session routes, or a stop, a hold or a release of the ticket a person's follow-up reached. A proactive candidate is accepted only in `auto` mode with enabled rules its assessment
    * matched, and a Trigger that already started a ticket returns that ticket's Decision. An invalid stop is recorded as
    * `ignore`; one judged under an older Policy as `unavailable`.
    * @throws UserError when the Trigger is unknown or not admissible, `outcome.evalId` names an Eval that has finished, a
-   * ticket's worker still decides the Trigger and the outcome is not a stop, or an inferred candidate is accepted outside `auto`
-   * mode or without enabled matching rules.
+   * ticket's worker still decides the Trigger and the outcome is not a stop, a hold or a release, or an inferred candidate
+   * is accepted outside `auto` mode or without enabled matching rules.
    */
   decide(triggerId: string, outcome: Outcome): Decision { return this.repo.atomic(() => this.evals.decide(triggerId, outcome)) }
   /**
@@ -158,6 +159,18 @@ export class Engine {
    * @throws UserError when the ticket is unknown.
    */
   stopTicket(ticketId: string, reason?: string): Ticket { return this.repo.atomic(() => this.tickets.stop(ticketId, reason)) }
+  /**
+   * A person puts a ticket on hold in the panel: see `Tickets.hold`. A ticket on hold keeps the hold it has.
+   * @throws UserError when the ticket is unknown or has ended.
+   */
+  holdTicket(ticketId: string, reason?: string): Ticket {
+    return this.repo.atomic(() => this.tickets.hold(ticketId, { by: 'panel', reason: reason || reasonText({ code: 'humanHold' }) }))
+  }
+  /**
+   * A person lifts a ticket's hold in the panel: see `Tickets.release`.
+   * @throws UserError when the ticket is unknown, has ended, or is not on hold.
+   */
+  releaseTicket(ticketId: string): Ticket { return this.repo.atomic(() => this.tickets.release(ticketId, 'panel')) }
   /**
    * A person retries a ticket whose worker reported failed or blocked (or whose input delivery failed): the stalled
    * Assignment ends and a new one starts under the same Mandate.
@@ -262,7 +275,7 @@ export type EngineForSources = Pick<Engine, 'receive' | 'bindThread' | 'threadCl
 /** What the main Session asks of the Engine. */
 export type EngineForMainSession = Pick<Engine, 'candidate' | 'candidateDelivered' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'>
 /** What people ask of the Engine, through the panel or the main Session. */
-export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss'>
+export type EngineForPeople = Pick<Engine, 'stopTicket' | 'holdTicket' | 'releaseTicket' | 'retryTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss'>
 /** What Settings tells the Engine. */
 export type EngineForSettings = Pick<Engine, 'policyChanged'>
 /** What the Executor tells the Engine, and what its workers ask of it. */

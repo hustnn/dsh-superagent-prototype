@@ -23,7 +23,7 @@ A person's message on a Ticket's own Thread belongs to that Ticket's Executor to
 
 Ownership continues while the Ticket is live, even if a person removes its Subscription. It also covers an ended Ticket that was not stopped by a person and has the message waiting to resume it.
 
-The main Session receives a follow-up notice. While an Executor owns the message, the main Session may only stop work on the person's request; accept, attach, ignore and requeue are refused. A stop still passes through the gate with the follow-up strength described below.
+The main Session hears of the follow-up. One whose words may ask to stop, wait or go on wakes it; any other reaches it as a notice it reads at its next turn, and the Executor escalates one it reads as such a request. While an Executor owns the message, the main Session may only stop, hold or release work on the person's request; accept, attach, ignore and requeue are refused. A stop, a hold or a release still passes through the gate with the follow-up strength described below.
 
 ### Handing back and releasing follow-ups
 
@@ -82,7 +82,7 @@ An automated reviewer using an ordinary account counts as a person to the host. 
 
 ## Routing candidates
 
-The main Session routes explicit candidates with `orchestrator_route`. One call can contain several accept, attach, stop or ignore decisions. Each item is processed independently: a refused item or a missing field does not prevent the others from running.
+The main Session routes explicit candidates with `orchestrator_route`. One call can contain several accept, attach, stop, hold, release or ignore decisions. Each item is processed independently: a refused item or a missing field does not prevent the others from running.
 
 An inferred candidate normally needs a full assessment. There is one shortcut: if its card clearly touches no enabled rule, such as plain chat or unrelated discussion, the main Session may ignore it directly. The Decision records `ignoredFromCard` to distinguish this from a rule assessment. The main Session reads the enabled rules in its Policy prompt section.
 
@@ -142,6 +142,18 @@ If revalidation fails, the Ticket stays ended and takes none of its waiting mess
 
 - **A person saying "stop" in a Thread is an ordinary Trigger,** and Eval decides stop. An Executor cannot declare that a person asked it to stop.
 - **Stop in the panel is a command.** It acts on the Ticket directly and is recorded as a manual stop.
+
+### Hold and release
+
+A person who asks a live Ticket to wait, such as for a product decision, puts it on hold; one who says to go on lifts the hold. Both are ordinary Triggers that Eval decides, as a stop is: the gate must give the message explicit strength, so a guest's message, an unknown or ended Ticket, and a release of a Ticket that is not on hold are recorded as `ignore` with `holdNotExplicit`, `holdUnknown` or `notHeld`. The panel holds and releases directly, as it stops. An Executor cannot place or lift a hold: it escalates a message it reads as asking to stop, wait or go on.
+
+A hold changes no Mandate and ends nothing. While it lasts:
+
+- automatic Inputs, such as CI and bots, are recorded but not delivered, as for a `blocked` Ticket, while a person's messages still reach the Executor, which may read and answer them;
+- the Engine refuses a `ready` Report, an acknowledgement of new work and a result reply;
+- the Executor's prompt carries a Hold section on every model request, so compaction and restarts keep it, and its tool guard refuses file writes, commits, pushes and GitHub or Feishu writes, unless a person typed the latest message into the Executor Session after the hold began. Like blocked commands, the guard is a default, not a security boundary.
+
+A Ticket keeps its first hold until a person lifts it; the release delivers a `released` Input that tells the Executor to look at what came meanwhile and go on. The Ticket's end clears the hold. A hold or a release settles the message that asked for it, so that message does not go to Eval again when the Ticket ends.
 - **Waiting conditions belong to Sources.** A condition such as "no assignee for N hours" would be a Source that waits and checks again itself; Eval never waits.
 
 ## When Eval does not finish

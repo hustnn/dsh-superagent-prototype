@@ -2,13 +2,14 @@
 import { latestAssignment, waitsForPerson, type Ticket } from './model.ts'
 
 /** High-level execution stage of a ticket: waiting on a person, actively working or queued, idle between turns, or ended. */
-export type TicketStage = { stage: 'person'; action: 'delivery' | 'answer' | 'review' | 'blocked' | 'failed' }
+export type TicketStage = { stage: 'person'; action: 'delivery' | 'hold' | 'answer' | 'review' | 'blocked' | 'failed' }
   | { stage: 'working'; action?: 'queued' } | { stage: 'idle' } | { stage: 'ended' }
 
 /** Classifies a ticket's stage; the rules follow the table in docs/003 in order, where the first matching row wins. */
 export function ticketStage(ticket: Ticket): TicketStage {
   if (ticket.ended) return { stage: 'ended' }
   if (ticket.delivery) return { stage: 'person', action: 'delivery' }
+  if (ticket.hold) return { stage: 'person', action: 'hold' }
   if (ticket.attention) return { stage: 'person', action: 'answer' }
   const assignment = latestAssignment(ticket)
   const report = assignment?.report?.state

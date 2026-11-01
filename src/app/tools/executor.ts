@@ -1,18 +1,19 @@
-/** Executor Session tools for reading ticket context, acknowledging requests, managing threads, handing back out-of-scope triggers, and reporting status. */
+/** Executor Session tools for reading ticket context, acknowledging requests, managing threads, handing back out-of-scope triggers, escalating a person's stop, hold or release, and reporting status. */
 import { z } from 'zod'
-import { liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
+import { UserError, liveTicket, reached, type EngineForExecutor, type Ticket } from '../../core/index.ts'
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
 import type { SourceContext } from '../../sources/host.ts'
 import { readResource, type ResourceHost } from '../resources.ts'
 import type { Store } from '../store.ts'
-import { reportRelay, threadFollowedNotice } from '../notices.ts'
+import { escalationRelay, reportRelay, threadFollowedNotice } from '../notices.ts'
+import { triggerMessage } from '../../executor/dsh.ts'
 import type { Sessions } from '../sessions.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 export interface ExecutorToolsHost {
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
-  readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'decisions' | 'replyStatus' | 'atomic'>
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
   readonly resources: ResourceHost
   /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
@@ -70,6 +71,32 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         reason: z.string().trim().min(1).max(300).describe('One sentence on what it asks for beyond this ticket.'),
       }).strict(),
       execute: async args => ({ trigger_id: args.trigger_id, queued: host.engine.handback(ticketId, args.trigger_id, args.reason) }),
+    }),
+    tool({
+      name: 'orchestrator_escalate',
+      description: 'Pass the orchestrator a person\'s message on this ticket\'s threads that asks to stop it, wait or go on after a hold, as the work section says; the orchestrator decides it.',
+      schema: z.object({
+        trigger_id: z.string().min(1),
+        ask: z.enum(['stop', 'hold', 'release']).describe('What the person asks: stop the work, hold it until they say to go on, or release a hold.'),
+        reason: z.string().trim().min(1).max(300).describe('One sentence on what the person asks.'),
+      }).strict(),
+      execute: async args => host.store.atomic(() => {
+        const current = host.store.tickets.get(ticketId), trigger = host.store.triggers.get(args.trigger_id)
+        if (!current || !liveTicket(current)) throw new UserError('ticketEnded')
+        if (!trigger) throw new UserError('unknownTrigger')
+        if (!trigger.human) throw new UserError('ackNotPerson')
+        // Only a message on one of the ticket's own Threads, not one it follows for context, is the ticket's to escalate.
+        if (!reached(current, trigger, key => host.store.threads.get(key), false)) throw new UserError('notReached')
+        // The main Session, woken by the message's own words, may have decided it for this ticket already.
+        const decisionId = host.store.triggers.disposition(trigger.id)?.decisionId
+        const decided = decisionId ? host.store.decisions.get(decisionId) : undefined
+        if (decided?.ticketId === ticketId && ['stop', 'hold', 'release'].includes(decided.kind)) {
+          return { escalated: false, trigger_id: args.trigger_id, decided: decided.kind }
+        }
+        const relay = escalationRelay(current, triggerMessage(trigger, {}), args.ask, args.reason)
+        host.sessions.relay(relay.id, relay.text)
+        return { escalated: true, trigger_id: args.trigger_id, ask: args.ask }
+      }),
     }),
     tool({
       name: 'orchestrator_report',
