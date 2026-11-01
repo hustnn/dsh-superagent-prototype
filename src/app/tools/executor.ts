@@ -6,6 +6,7 @@ import { claimPull, readPull } from '../../sources/github-pull.ts'
 import type { SourceContext } from '../../sources/host.ts'
 import { readResource, type ResourceHost } from '../resources.ts'
 import type { Store } from '../store.ts'
+import type { Ledger } from '../ledger.ts'
 import { escalationRelay, reportRelay, threadFollowedNotice } from '../notices.ts'
 import { triggerMessage } from '../../executor/dsh.ts'
 import type { Sessions } from '../sessions.ts'
@@ -14,6 +15,7 @@ import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 export interface ExecutorToolsHost {
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'decisions' | 'replyStatus' | 'atomic'>
+  readonly ledger: Pick<Ledger, 'index'>
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
   readonly resources: ResourceHost
   /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
@@ -108,6 +110,8 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         question_for_trigger_id: z.string().optional().describe('With human_action: the human message that raised the question, which is asked where that person wrote.'),
         pr_number: z.number().int().positive().nullish().describe(`The ticket's PR: its source PR, or one by ${host.github.deployment.github.login} from a branch named after this ticket (DSH_SUPERAGENT_NAME).`),
         reply_to_trigger_id: z.string().optional().describe('The explicit human question this report answers; never for ordinary progress.'),
+        memo: z.object({ summary: z.string().trim().min(1).max(600), keywords: z.array(z.string().trim().min(1).max(40)).max(8) }).strict()
+          .optional().describe('With ready or dropped: what changed, and keywords in English and the source language, which later searches find the ticket by.'),
       }).strict(),
       execute: async (args, signal) => {
         const current = host.store.tickets.get(ticketId)
@@ -117,10 +121,14 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
         return host.store.atomic(() => {
           const refused = pull && claimPull(host.github, ticketId, pull)
           if (refused) throw new Error(refused)
+          // The memo enters the ledger before the report, so a report that ends the ticket indexes it with the memo.
+          if (args.memo) host.ledger.index(ticketId, args.memo)
           const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
           const updated = host.engine.report(ticketId, report)
+          // A result that leaves the ticket open, such as a PR that waits for review, is found by its summary from now.
+          if (args.state === 'ready' && !updated.ended) host.ledger.index(ticketId)
           const relay = reportRelay(updated, report)
           if (relay) host.sessions.relay(relay.id, relay.text)
           const notification = relay ? 'orchestrator' : 'internal_only'

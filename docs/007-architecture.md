@@ -155,12 +155,21 @@ Its interfaces are grouped by purpose:
 
 - **Domain repositories:** `atomic`, plus `triggers`, `threads`, `tickets` and `decisions`, each with `get`, `save` and list queries. Indexed working sets are `threads.active()`, `tickets.open()`, `tickets.active()` and `read.subscribedThreads`.
 - **Read queries:** `read` serves views, tools and Source polls through methods such as `threadTriggers`, `triggerStats`, `search` and `droppedReplies`. These methods never write.
+- **Ledger tables:** Store creates `ledger` and its FTS5 index `ledger_fts`; `Ledger` (`src/app/ledger.ts`) is their only writer.
 - **Source metadata:** `threads.describe` and `threads.patchMeta` update Source-owned Thread metadata.
 - **Settings:** `settings`, `saveSettings`, `blockRevision` and `settingsHistory`. Settings and prompts use numbered `Versions` (`src/app/versions.ts`).
 - **Outbox receipts:** `replyStatus` and `receipts`, written only by Outbox. Receipt operations are `get`, `waiting`, `behind`, `add`, `settle` and `withdraw`. `behind` checks whether an earlier message for the same Ticket and conversation is waiting with fewer than three failures. A withdrawn message settles with `channelGone` or `channelIgnored`. Read queries expose failed and dropped replies through `failingReplies`, `droppedReplies` and `droppedSince`.
 - **Typed key-value records:** `get`, `set`, `delete` and `keys`, using entries from `KV`.
 
 `afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; the schema 11 migration converts older supported records at startup.
+
+### Ledger
+
+`Ledger` (`src/app/ledger.ts`) keeps one search entry per Ticket, so the main Session finds earlier work that compaction took out of its context. An entry holds the words of the Ticket's title and scope, the messages it was accepted from, its latest Report, its Executor's memo, its pull requests as `#<number>` and the people on it, and when it was last active.
+
+It indexes a Ticket in the transaction of the change: on `ticket.created` and `ticket.ended`, on a `ready` Report that leaves it open, and on a Report with a `memo`, which the Executor writes with a `ready` or `dropped` Report in English and the source language, since a word matches only itself. At startup, `backfill` indexes the Tickets that have no entry.
+
+Text becomes words as `searchTerms` (`src/infra/text.ts`) splits it: `Intl.Segmenter` words, lowercased, without stop words and single characters other than digits, so Chinese matches by words. A search quotes each word of the query, joins them with `OR`, ranks the hits by BM25 and then by activity, and keeps those that hold at least `least` of its words. `orchestrator_recall` asks for one, with days and an open or ended state as filters; a candidate card's `similar_tickets` asks for two, outside the Tickets the card already lists.
 
 ### Effects
 
@@ -337,7 +346,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/assessment.ts` | The MasterAssessor, the assessment schema and the window `orchestrator_eval` answers |
 | `src/app/execution-environment.ts` | The execution environment: its variables, a Ticket's values, the directory root and the lines of the prompt section, which `src/app/prompts.ts` fills into its template |
 | `src/app/source-context.ts` | `sourceContextOf`: each Source kind's `SourceContext` |
-| `src/app/links.ts` | `sourceLink`, the page of a Trigger's message, and `candidateCard` |
+| `src/app/links.ts` | `sourceLink`, the page of a Trigger's message, and `candidateCard` with its referenced and similar Tickets |
+| `src/app/ledger.ts` | `Ledger`: the search index of every Ticket's words that `orchestrator_recall` and `similar_tickets` read |
 | `src/app/cards.ts` | Compact cards of Triggers, Tickets, Threads and Decisions for models, the closed set of ticket card states `TICKET_STATES`, and `textPage` |
 | `src/app/resources.ts` | `RESOURCES` and `readResource`: what `orchestrator_read` reads, for each role |
 | `src/app/tools/tool.ts` | The `Tool` type, `readTool`, the `orchestrator_read` of both roles, and `AcknowledgementSchema` |
@@ -419,6 +429,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/passes.spec.ts` | Passes: one at a time, the ones asked for during a pass run as one after it, and the runtime health a failed pass reports |
 | `tests/outbox.spec.ts` | The Outbox on a running Runtime: messages wait while processing is paused or their Source is not installed |
 | `tests/cache.spec.ts` | `TextCache` |
+| `tests/ledger.spec.ts` | The ledger: search terms and stop words, indexing on a Ticket's creation, result and end, memos, recall filters, `similar_tickets` and the backfill |
 | `tests/queue.spec.ts` | The Runtime's work through the effect queue, and what earlier versions stored |
 | `tests/followups.spec.ts` | A person's follow-up on a Ticket's Thread: its notice to the main Session, the tools that act on it, what a burst costs; a worker's hand-back and context follow, and the main Session's note |
 | `tests/health.spec.ts` | One health entry per part, each cleared by its own next success |
@@ -490,11 +501,11 @@ Nothing deletes old records yet, so these grow without bound: the `trigger`, `di
 
 ### Main Session tools
 
-The main Session has 14 application tools:
+The main Session has 15 application tools:
 
 | Purpose | Tools |
 | --- | --- |
-| Read and route | `orchestrator_read`, `orchestrator_route` |
+| Read and route | `orchestrator_read`, `orchestrator_recall`, `orchestrator_route` |
 | Manage Tickets | `orchestrator_ticket_retry`, `orchestrator_ticket_request_status`, `orchestrator_ticket_note` |
 | Re-evaluate | `orchestrator_trigger_requeue` |
 | Assess proactive work | `orchestrator_eval`, `orchestrator_eval_read`, `orchestrator_eval_decide` |
@@ -586,7 +597,7 @@ These messages are steered into the main Session's turn:
 
 | Message | Content |
 | --- | --- |
-| Candidate | Batch Trigger cards, Thread, `related_tickets`, `tickets_total`, `delivered_to`, referenced Tickets from Issue/PR links, `handed_back` reasons and the next action |
+| Candidate | Batch Trigger cards, Thread, `related_tickets`, `tickets_total`, `delivered_to`, referenced Tickets from Issue/PR links, `similar_tickets` that share at least two of its words, `handed_back` reasons and the next action |
 | `follow_up` | One message as its Executor sees it, `replies_to`, receiving Tickets, and the reminder that Executors decide it while the main Session may only stop, hold or release work; steered only when its words may ask that, else injected |
 | `escalation` | An Executor's reading of a person's message as asking to stop, hold or release its Ticket, with the Ticket card and the reason |
 | `worker_report` | Ticket card, originating Trigger, state and summary up to 600 characters; `chars` and a read pointer when truncated |

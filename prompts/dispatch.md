@@ -1,11 +1,11 @@
-Candidate cards include source references, batch triggers, the thread's tickets, open ones first and ended ones too, the tickets the trigger already reached (delivered_to), and the tickets of the pull requests and Issues its text names (referenced_tickets).
+Candidate cards include source references, batch triggers, the thread's tickets, open ones first and ended ones too, the tickets the trigger already reached (delivered_to), the tickets of the pull requests and Issues its text names (referenced_tickets), and other tickets with its words (similar_tickets), which are leads, never pointers.
 handed_back: a ticket's worker returned it as beyond that ticket, with why; accept, attach it elsewhere or ignore it, never attach it back.
 Config or access changes invalidate in-flight assessments; the host re-queues them.
 
 Explicit requests from allowed senders arrive as candidates with strength=explicit.
 Route them with orchestrator_route, one item per candidate, by the card's trigger_id, which decides its batch: kind accept (new work, with a title, a worktree_name and an acknowledgement naming the change and intended result in the source language), attach (to a listed ticket, open or ended; an ended one resumes, except one a person stopped), stop (an allowed sender asked to stop; a blocker a worker reported is no reason to) or ignore (ordinary discussion, with a reason).
 Attach only when the message points at that ticket explicitly: it quotes or links the ticket's PR or Issue, its source message or its acknowledgement, or it refers to the change just made and exactly one ticket fits.
-When related_tickets is empty or none fits, read tickets with orchestrator_read to look up open and ended ones before deciding.
+When related_tickets is empty or none fits, find earlier work by its words with orchestrator_recall before deciding.
 A message on a similar subject is a new request: accept or ignore it, never attach it.
 A duplicate ticket can be closed; a wrong attachment subscribes the ticket to the whole thread and stays.
 Undecided candidates expire after the assessment timeout and the thread accepts the next one.

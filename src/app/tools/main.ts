@@ -12,6 +12,7 @@ import { readResource, type MainResourceHost, type ResourceHost } from '../resou
 import type { Sessions } from '../sessions.ts'
 import type { Settings } from '../settings.ts'
 import type { Store } from '../store.ts'
+import type { Ledger } from '../ledger.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 const RoutingNoteSchema = z.string().trim()
@@ -21,6 +22,7 @@ export interface MainToolsHost {
   readonly context: Context
   readonly engine: Pick<EngineForMainSession, 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'> & EngineForPeople
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'atomic' | 'replyStatus' | 'settings'>
+  readonly ledger: Pick<Ledger, 'search'>
   readonly prompts: Pick<Prompts, 'preview' | 'save'>
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery' | 'modelRetry'>
   readonly settings: Pick<Settings, 'view' | 'block' | 'save' | 'pause' | 'sync'>
@@ -161,6 +163,32 @@ function routeTool(host: MainToolsHost): Tool {
     },
   })
 }
+/** How many tickets one page of `orchestrator_recall` holds. */
+const RECALL_PAGE = 5
+/** A UTC day, `YYYY-MM-DD`; a plain pattern, since a date schema's JSON spells out every calendar rule in each tool definition. */
+const DaySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(day => !Number.isNaN(Date.parse(day)), 'Not a day')
+/** `orchestrator_recall`: open and ended tickets found by their words in the ledger, best match first, as ticket cards. */
+function recallTool(host: MainToolsHost): Tool {
+  return tool({
+    name: 'orchestrator_recall',
+    description: 'Find tickets by their words, best match first, such as earlier work a message names without a link.',
+    schema: z.object({
+      query: z.string().trim().min(1).max(300).describe('Its subject, PR or Issue numbers or people, in any language.'),
+      since: DaySchema.optional().describe('Active since, YYYY-MM-DD.'),
+      until: DaySchema.optional().describe('Active until, YYYY-MM-DD.'),
+      state: z.enum(['open', 'ended']).optional(),
+      offset: z.number().int().min(0).default(0),
+    }).strict(),
+    execute: async ({ query, offset, ...filters }) => {
+      const hits = host.ledger.search(query, { ...filters, offset, limit: RECALL_PAGE + 1 })
+      const items = hits.slice(0, RECALL_PAGE).flatMap(hit => {
+        const ticket = host.store.tickets.get(hit.ticketId)
+        return ticket ? [{ ...ticketCard(ticket), at: hit.at, matched: hit.matched }] : []
+      })
+      return { items, next_offset: hits.length > RECALL_PAGE ? offset + RECALL_PAGE : null }
+    },
+  })
+}
 /** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session. */
 export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
   const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings }
@@ -168,6 +196,7 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
     readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',
       false, (resource, offset, limit, signal) => readResource(resources, resource, offset, limit, undefined, signal)),
     routeTool(host),
+    recallTool(host),
     tool({
       name: 'orchestrator_ticket_retry',
       description: 'Start a new assignment on an explicit human request to retry a ticket whose worker reported failed or blocked, or whose input was not delivered; the stalled one ends.',

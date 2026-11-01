@@ -32,6 +32,7 @@ import { Prompts } from './prompts.ts'
 import { registerHttp, type HttpHost } from './http.ts'
 import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
+import { Ledger } from './ledger.ts'
 import { eventNotice, followupNotice } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
 import { HealthBoard } from '../infra/health.ts'
@@ -58,6 +59,8 @@ const now = (): string => new Date().toISOString()
  */
 export class Runtime extends Service implements SourceHost {
   readonly store: Store
+  /** The search index of every ticket's words, which the main Session's recall and candidate cards read. */
+  readonly ledger: Ledger
   readonly setup: Setup
   readonly prompts: Prompts
   readonly effects: Effects
@@ -96,6 +99,7 @@ export class Runtime extends Service implements SourceHost {
     try {
       const report = (error: unknown) => { ctx.logger.warn('dsh-superagent: %s', String(error)) }
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
+      const ledger = this.ledger = new Ledger({ store })
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
@@ -112,7 +116,7 @@ export class Runtime extends Service implements SourceHost {
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
       })
-      const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
+      const links: LinkHost = { store, ledger, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId, context: ctx,
@@ -136,6 +140,8 @@ export class Runtime extends Service implements SourceHost {
       const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
+          // A ticket's words enter the ledger in the transaction that creates or ends it.
+          if (event.type === 'ticket.created' || event.type === 'ticket.ended') ledger.index(event.data.ticketId)
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
           if (notice) sessions.notify(...notice)
@@ -161,7 +167,7 @@ export class Runtime extends Service implements SourceHost {
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
-      this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
+      this.toolHost = { context: ctx, engine, store, ledger, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
@@ -203,6 +209,8 @@ export class Runtime extends Service implements SourceHost {
   private async initialize(): Promise<void> {
     // Register management HTTP routes before setup completes so operators can fix setup problems in the UI.
     this.disposers.push(registerHttp(this.ctx, this.httpHost()))
+    // Tickets an earlier version recorded, before the ledger, enter it once.
+    this.ledger.backfill()
     if (!await this.setup.run(this.store.settings())) {
       this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
       return
