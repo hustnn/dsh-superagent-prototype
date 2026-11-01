@@ -182,6 +182,7 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 | Kind | Handler | Does | At once | Retry |
 | --- | --- | --- | --- | --- |
 | `assessment` | MasterAssessor | Steers an Eval's candidate card into the main Session's turn, then tells the Engine it was delivered, which starts the Eval's deadline | 4, none while paused | 2 s doubling to 60 s |
+| `assessor` | MasterAssessor | Has an assessor subagent of the main Session assess an Eval's proactive candidate, and holds the effect until the subagent ends | `eval.assessors`, none while paused | 2 s doubling to 60 s |
 | `launch` | DshExecutor | Launches a pending Assignment: prepare command, Executor Session, assignment message | The free worker slots, none while paused | A passing failure of the model provider or the network runs again after 5 s doubling to 300 s, three times; any other failure, and a failed prepare command, fails its Ticket. One held by a pause or by full worker slots tries again after 5 s |
 | `delivery` | DshExecutor | Hands a Ticket's waiting Inputs to its running Assignment, in order | 4, none while paused | 2 s doubling to 60 s; one that waits for a worker slot tries again after 2 s |
 | `relay` | Sessions | Steers a worker's report or question, or a person's follow-up, into the main Session's turn | 1, in queue order | 2 s doubling to 60 s |
@@ -218,7 +219,9 @@ Transient provider and network failures get three retries. Launches use effect b
 
 ### MasterAssessor
 
-`MasterAssessor` (`src/app/assessment.ts`) lets the main Session assess proactive candidates. `request` queues an assessment effect; `release` drops cached state when its Eval ends.
+`MasterAssessor` (`src/app/assessment.ts`) lets the main Session, or its assessor subagents, assess proactive candidates. `request` queues an `assessment` effect, or an `assessor` effect for an inferred candidate while `eval.assessors` is above 0; `release` drops cached state and stops the Eval's assessor when its Eval ends.
+
+The `assessor` handler starts a child of the main Session through `ctx.subagents.startActivation`: the `spawn` provider, a reserved `assessor-<hash>` id, the `dsh-superagent-assessor` preset, the candidate card as its first message, and `delivery: 'caller'`, so its end does not wake the main Session. The Eval's deadline counts from the start. `Sessions` decorates the child with `Prompts.assessor` and the eval tools that `assessorTools` limits to its Trigger, and restricts every other tool. An accept tells the main Session through a `proactive_ticket` notice. A child that ends without deciding records `unavailable`; the host's stop releases running children and leaves their Evals to expire. Structured output is not used: DeepSeek Harness accepts only a small JSON Schema subset, without length limits or nullable fields, so the child decides through `orchestrator_eval_decide`, whose schema the host validates.
 
 Its `context`, `read` and `decide` methods serve `orchestrator_eval`, `orchestrator_eval_read` and `orchestrator_eval_decide`. They provide bounded Thread context through `SourceRegistry.threadContext`, repository context, and decision submission. A kind without a context reader supplies only the Trigger and batch.
 
@@ -242,7 +245,7 @@ Validation inherits an omitted base from the saved override, drops removed parts
 
 ### Sessions
 
-`Sessions` (`src/app/sessions.ts`) manages DeepSeek Harness Sessions for both roles. `ensure` creates a Session with its role's model. `install` follows agent events and registers prompts, skills and tools for managed Sessions.
+`Sessions` (`src/app/sessions.ts`) manages DeepSeek Harness Sessions for both roles, and decorates the assessor subagents of the main Session that `MasterAssessor.assessing` names. `ensure` creates a Session with its role's model. `install` follows agent events and registers prompts, skills and tools for managed Sessions.
 
 `prompt` delivers once per request id. `relay` and `notify` enqueue main-Session messages handled by the `relay` and `notice` effects. `src/app/notices.ts` defines their content; `delivery` checks whether a message arrived.
 
@@ -343,7 +346,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
-| `src/app/assessment.ts` | The MasterAssessor, the assessment schema and the window `orchestrator_eval` answers |
+| `src/app/assessment.ts` | The MasterAssessor, its assessor subagents, the assessment schema and the window `orchestrator_eval` answers |
 | `src/app/execution-environment.ts` | The execution environment: its variables, a Ticket's values, the directory root and the lines of the prompt section, which `src/app/prompts.ts` fills into its template |
 | `src/app/source-context.ts` | `sourceContextOf`: each Source kind's `SourceContext` |
 | `src/app/links.ts` | `sourceLink`, the page of a Trigger's message, and `candidateCard` with its referenced and similar Tickets |

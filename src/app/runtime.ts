@@ -22,7 +22,7 @@ import { environmentOf, ticketEnvironment, type Variable } from './execution-env
 import type { SetupProblem } from '../setup.ts'
 import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { ticketCard } from './cards.ts'
-import { MasterAssessor } from './assessment.ts'
+import { MasterAssessor, type AssessorSpawner } from './assessment.ts'
 import { KV } from '../kv.ts'
 import { Store } from './store.ts'
 import { evalsHealth } from './views/overview.ts'
@@ -45,7 +45,7 @@ import { Sessions } from './sessions.ts'
 import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
-import { mainTools, type MainToolsHost } from './tools/main.ts'
+import { assessorTools, mainTools, type MainToolsHost } from './tools/main.ts'
 import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
 
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
@@ -125,7 +125,9 @@ export class Runtime extends Service implements SourceHost {
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
-        tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
+        tools: (agent, ticket, triggerId) => ticket ? executorTools(this.toolHost, ticket)
+          : triggerId ? assessorTools(this.toolHost, agent, triggerId) : mainTools(this.toolHost, agent),
+        assessing: sessionId => this.assessor.assessing(sessionId) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
@@ -134,7 +136,13 @@ export class Runtime extends Service implements SourceHost {
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
-        deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
+        deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate),
+        subagents: () => ctx.get('subagents') as AssessorSpawner | undefined,
+        parent: async () => {
+          const resolved = await ctx.sessionController.resolveAgent(masterId as SessionId)
+          if ('error' in resolved) throw resolved.error
+          return resolved.agent
+        } })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)

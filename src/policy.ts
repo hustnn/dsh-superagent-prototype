@@ -84,6 +84,8 @@ export const EvalConfigSchema = z.object({
   mode: z.enum(['off', 'observe', 'auto']).default('observe'),
   timeoutSeconds: z.number().int().min(LIMITS.evalTimeoutSeconds.min).max(LIMITS.evalTimeoutSeconds.max).default(120),
   model: RoleModelSchema.nullable().default(null),
+  /** How many subagents of the main Session assess proactive candidates at once; 0 leaves them to the main Session. */
+  assessors: z.number().int().min(LIMITS.assessors.min).max(LIMITS.assessors.max).default(0),
 }).strict()
 const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => name !== '.' && name !== '..', 'Not a command name')
   .refine(name => !WORKER_COMMANDS.includes(name), `${WORKER_COMMANDS.join(', ')} cannot be blocked`)

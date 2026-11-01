@@ -86,6 +86,8 @@ The main Session routes explicit candidates with `orchestrator_route`. One call 
 
 An inferred candidate normally needs a full assessment. There is one shortcut: if its card clearly touches no enabled rule, such as plain chat or unrelated discussion, the main Session may ignore it directly. The Decision records `ignoredFromCard` to distinguish this from a rule assessment. The main Session reads the enabled rules in its Policy prompt section.
 
+The main Session assesses inferred candidates itself unless the Eval settings' **assessors** is above 0. Then a subagent of the main Session assesses each one, at most that many at once, under the same admission rules and Policy, with the eval tools for that candidate alone. The main Session receives only explicit candidates, and its prompt carries neither the admission rules nor the Policy section. It hears of a Ticket an assessor accepted through a notice that does not wake it. An assessor that ends without a decision records `unavailable` (`assessorUndecided`), and so does a deployment without DeepSeek Harness's subagent service (`noAssessor`).
+
 Accepting an inferred candidate always requires an assessment. Direct accept refuses a Trigger that the gate did not admit as explicit.
 
 ## Accept mode and rules

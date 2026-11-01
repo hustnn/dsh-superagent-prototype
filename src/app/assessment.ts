@@ -1,8 +1,9 @@
 /** Proactive candidate assessment for the main Session: relays candidate cards, serves bounded context reads, and records outcomes. */
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { reasonText, threadKey, type Assessor, type AssessmentOutcome, type Candidate, type EngineForMainSession,
-  type Trigger } from '../core/index.ts'
+import { key, reasonText, threadKey, type Assessor, type AssessmentOutcome, type Candidate, type EngineForMainSession,
+  type Reason, type Trigger } from '../core/index.ts'
 import { AdmissionDirectionSchema, RuleAssessmentSchema, assessmentOutcome, directionAllowed, type Settings } from '../policy.ts'
 import { checkedImText } from '../infra/text.ts'
 import type { Commands } from '../infra/commands.ts'
@@ -45,6 +46,19 @@ type ReadCache = {
 interface EvalReads { cache: ReadCache; context?: AssessmentContext; error?: string; loading?: Promise<void> }
 /** Message returned when assessing a Trigger whose Source provides no thread context. */
 const NO_CONTEXT = 'This Source gives no Thread context; assess the Trigger\'s own text and the batch.'
+/** The agent preset assessor subagents run under, which the bundle's patch defines. */
+export const ASSESSOR_PRESET = 'dsh-superagent-assessor'
+/** The prefix of an assessor subagent's Session id, `assessor-<hash>`, which `Sessions` decorates as an assessor. */
+export const ASSESSOR_PREFIX = 'assessor-'
+/**
+ * What the assessor pool asks of DeepSeek Harness's subagent service (`ctx.subagents`): a child of the main Session under a
+ * reserved id and the assessor preset, whose result comes back to the caller alone, and which `dispose` stops and releases.
+ */
+export interface AssessorSpawner {
+  startActivation(spec: { provider: string; label: string; childId: string; delivery: 'caller'; signal: AbortSignal
+    request: { parent: Agent; prompt: { type: 'text'; text: string }[]; agentPreset: string } }): Promise<AssessorRun>
+}
+export interface AssessorRun { readonly childId: string; readonly result: Promise<{ stopReason: string }>; dispose(): Promise<void> }
 /** Host dependencies used by `MasterAssessor`. */
 export interface AssessorHost {
   /** Active evaluations in `Engine` that the assessor reads and decides. */
@@ -61,6 +75,10 @@ export interface AssessorHost {
   /** Delivers a candidate card to the main Session once per request ID, resolving after the Session receives it. */
   deliver(requestId: string, text: string): Promise<void>
   candidateCard(candidate: Candidate): Promise<Record<string, unknown>>
+  /** DeepSeek Harness's subagent service, when it is mounted. */
+  subagents(): AssessorSpawner | undefined
+  /** The main Session's live Agent, the parent of the assessor subagents. */
+  parent(): Promise<Agent>
 }
 
 /** Schema for bounded context or repository read requests during an active evaluation (`orchestrator_eval_read`). */
@@ -89,8 +107,15 @@ export type EvalRead = z.infer<typeof EvalReadSchema>
 export class MasterAssessor implements Assessor {
   /** Per-evaluation read caches and thread contexts, keyed by `evalId`. */
   private readonly evals = new Map<string, EvalReads>()
+  /** The Trigger each running assessor subagent assesses, by its Session id. */
+  private readonly assessed = new Map<string, string>()
+  /** The assessor subagent of each Eval it assesses, which the Eval's end releases. */
+  private readonly runs = new Map<string, AssessorRun>()
   private readonly controller = new AbortController()
-  /** Registers the handler that relays each Eval's candidate card, which a link lookup may delay for seconds. */
+  /**
+   * Registers the handlers that relay each Eval's candidate card, which a link lookup may delay for seconds, and that have an
+   * assessor subagent assess a proactive one, at most `eval.assessors` at once.
+   */
   constructor(private readonly host: AssessorHost) {
     // Start the evaluation deadline only after the main Session receives the candidate card, so a busy Session does not consume evaluation time.
     host.effects.handle('assessment', async ({ triggerId }, evalId) => {
@@ -99,13 +124,62 @@ export class MasterAssessor implements Assessor {
       await this.host.deliver(`candidate:${evalId}`, JSON.stringify({ kind: 'candidate', ...await this.host.candidateCard(candidate) }))
       this.host.engine.candidateDelivered(evalId)
     }, { limit: () => host.paused() ? 0 : 4 })
+    host.effects.handle('assessor', async ({ triggerId }, evalId) => this.pool(triggerId, evalId),
+      { limit: () => host.paused() ? 0 : host.settings().eval.assessors })
   }
-  /** Enqueues an `assessment` effect to deliver `candidate`'s card to the main Session. */
-  request(candidate: Candidate): void { this.host.effects.enqueue('assessment', candidate.evalId, { triggerId: candidate.triggers[0]!.id }) }
+  /**
+   * Enqueues an effect for `candidate`: an `assessor` one for a proactive candidate while assessor subagents assess them
+   * (`eval.assessors`), else an `assessment` one that delivers its card to the main Session.
+   */
+  request(candidate: Candidate): void {
+    const pooled = candidate.strength !== 'explicit' && this.host.settings().eval.assessors > 0
+    this.host.effects.enqueue(pooled ? 'assessor' : 'assessment', candidate.evalId, { triggerId: candidate.triggers[0]!.id })
+  }
+  /** The Trigger the assessor subagent `sessionId` assesses, which its tools are limited to; undefined for any other Session. */
+  assessing(sessionId: string): string | undefined { return this.assessed.get(sessionId) }
+  /**
+   * Have a subagent of the main Session assess an Eval's proactive candidate with the eval tools: the card is its first
+   * message, the Eval's deadline counts from its start, and the Eval is recorded unavailable when the subagent ends without
+   * deciding, or when no subagent service is mounted. A failure to start it is retried as the effect is. When the host
+   * stops, the subagent is released and its Eval left to expire and be queued again.
+   */
+  private async pool(triggerId: string, evalId: string): Promise<void> {
+    const candidate = this.host.engine.candidate(triggerId)
+    if (candidate?.evalId !== evalId) return
+    const subagents = this.host.subagents()
+    const unavailable = (reason: Reason) => {
+      if (this.host.engine.candidate(triggerId)?.evalId === evalId) this.host.engine.decide(triggerId, { kind: 'unavailable', reason, evalId })
+    }
+    if (!subagents) { unavailable({ code: 'noAssessor' }); return }
+    const [parent, card] = await Promise.all([this.host.parent(), this.host.candidateCard(candidate)])
+    const childId = `${ASSESSOR_PREFIX}${key('assessor', evalId, randomUUID())}`
+    this.assessed.set(childId, triggerId)
+    try {
+      const run = await subagents.startActivation({ provider: 'spawn', label: `Assess ${triggerId}`, childId, delivery: 'caller',
+        signal: this.controller.signal, request: { parent, agentPreset: ASSESSOR_PRESET,
+          prompt: [{ type: 'text', text: JSON.stringify({ kind: 'candidate', ...card }) }] } })
+      this.runs.set(evalId, run)
+      this.host.engine.candidateDelivered(evalId)
+      const { signal } = this.controller
+      const stopped = new Promise<undefined>(resolve => { signal.addEventListener('abort', () => { resolve(undefined) }, { once: true }) })
+      const stop = await Promise.race([stopped, run.result.then(result => result.stopReason, (error: unknown) => `error: ${String(error).slice(0, 200)}`)])
+      if (stop !== undefined && !signal.aborted) unavailable({ code: 'assessorUndecided', values: { stop } })
+    } finally {
+      this.assessed.delete(childId)
+      const run = this.runs.get(evalId)
+      this.runs.delete(evalId)
+      await run?.dispose().catch(() => { /* A child that failed to stop is reported by DeepSeek Harness; its Eval has ended either way. */ })
+    }
+  }
   /** Whether `evalId` is still the active evaluation for `trigger`. */
   private live(evalId: string, trigger: Trigger): boolean { return this.host.engine.candidate(trigger.id)?.evalId === evalId }
-  /** Drop an Eval's context and reads once it finishes; any running load for it discards its result. */
-  release(evalId: string): void { this.evals.delete(evalId) }
+  /** Drop an Eval's context and reads once it finishes, and stop its assessor subagent; any running load for it discards its result. */
+  release(evalId: string): void {
+    this.evals.delete(evalId)
+    const run = this.runs.get(evalId)
+    this.runs.delete(evalId)
+    void run?.dispose().catch(() => { /* A child that failed to stop is reported by DeepSeek Harness; its Eval has ended either way. */ })
+  }
   /** Resolve the active evaluation for a trigger; historical triggers have none, and explicit requests are routed instead. */
   private evalFor(triggerId: string): { candidate: Candidate; trigger: Trigger } {
     const candidate = this.host.engine.candidate(triggerId)

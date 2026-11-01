@@ -25,7 +25,7 @@ export interface SessionsHost {
   /** DSH Cordis context: sessions, agents, persistence, and their events. */
   readonly context: Context
   readonly store: Pick<Store, 'tickets' | 'settings' | 'get' | 'set' | 'keys'>
-  readonly prompts: Pick<Prompts, 'current' | 'version' | 'compose' | 'skills'>
+  readonly prompts: Pick<Prompts, 'current' | 'version' | 'compose' | 'assessor' | 'skills'>
   readonly effects: Pick<Effects, 'enqueue' | 'handle' | 'idle' | 'pending'>
   /** The `models` health entry, which reports managed sessions waiting on a model-budget retry. */
   readonly health: HealthEntry
@@ -34,8 +34,10 @@ export interface SessionsHost {
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
-  /** Tools to register on the main Session (`ticket === undefined`) or on `ticket`'s worker Session. */
-  tools(agent: Agent, ticket?: Ticket): Tool[]
+  /** Tools to register on the main Session, on `ticket`'s worker Session, or on the assessor subagent that assesses `triggerId`. */
+  tools(agent: Agent, ticket?: Ticket, triggerId?: string): Tool[]
+  /** The Trigger the assessor subagent `sessionId` assesses; undefined for any other Session. */
+  assessing(sessionId: string): string | undefined
 }
 
 /**
@@ -257,7 +259,9 @@ export class Sessions {
     const host = this.host
     const master = agent.id === host.masterId
     const ticket = master ? undefined : this.ticketOf(agent)
-    if (!master && !ticket) { this.limitSubagent(agent); return }
+    // An assessor subagent of the main Session assesses one proactive candidate, with that candidate's eval tools only.
+    const assessed = master || ticket ? undefined : host.assessing(agent.id)
+    if (!master && !ticket && assessed === undefined) { this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }
     this.bindings.set(agent, binding)
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
@@ -266,10 +270,11 @@ export class Sessions {
     // Disable variable interpolation so literal ${{ ... }} expressions in team prompts are preserved.
     binding.disposers.push(agent.ctx.systemPrompt.section({ name: 'dsh-superagent-policy', order: 9999, interpolate: false, text: context => {
       const version = this.promptFor(agent, context.signal !== undefined)
+      if (assessed !== undefined) return `[dsh-superagent prompt revision ${version.revision}]\n${host.prompts.assessor(version.config)}`
       const current = ticket && host.store.tickets.get(ticket.id)
       const composed = host.prompts.compose(version.config, master ? 'orchestrator' : 'worker', current ? host.environment(current) : undefined)
       return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate) + holdInstructions(current) : ''}`
-    }, ...(master ? { complete: true } : {}) }))
+    }, ...(master || assessed !== undefined ? { complete: true } : {}) }))
     // A recreated skill scope (e.g. after the skills service restarts) starts empty, so reset `binding.skills` before rebinding.
     const skillScope = agent.ctx.inject(['skills'], scope => {
       binding.scope = scope
@@ -281,8 +286,9 @@ export class Sessions {
     // Bail out if the agent was disposed while awaiting the skill scope.
     if (this.bindings.get(agent) !== binding) return
     const register = this.registerTool(agent, binding)
-    for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
-    if (master) {
+    for (const tool of host.tools(agent, ticket, assessed)) register(tool.name, tool.description, tool.schema, tool.execute)
+    if (assessed !== undefined) binding.disposers.push(agent.ctx.tools.restrict({ allow: [] }))
+    else if (master) {
       binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }),
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
     } else {

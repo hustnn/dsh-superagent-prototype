@@ -74,6 +74,9 @@ export function eventNotice(event: DomainEvent, ticket: (id: string) => Ticket |
   return undefined
 }
 
+/** Builds a background notice that an assessor subagent accepted a proactive candidate as a ticket, which the main Session did not decide itself. */
+export const proactiveNotice = (ticket: Ticket, triggerId: string): Notice =>
+  receiptNotice({ proactive_ticket: brief(ticket), trigger_id: triggerId }, `An assessor accepted ticket ${ticket.id} from trigger ${triggerId}`)
 /** Builds a background notice when a ticket's worker subscribes to a related thread for context only. */
 export const threadFollowedNotice = (ticketId: string, thread: string, reason: string): Notice =>
   receiptNotice({ thread_followed: { ticket_id: ticketId, thread, reason },

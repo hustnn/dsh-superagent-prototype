@@ -19,6 +19,8 @@ export const teamDefaults = {
 }
 
 export const mainAdmissionPolicy = promptFile('admission')
+/** What an assessor subagent is, ahead of the admission and Policy sections it shares with the main Session. */
+export const assessorPrompt = promptFile('assessor')
 
 const handoff = { shared: promptFile('handoff'), orchestrator: promptFile('handoff-orchestrator'), worker: promptFile('handoff-worker') }
 export const handoffPolicy = (role: 'orchestrator' | 'worker'): string => `${handoff.shared}\n${handoff[role]}`

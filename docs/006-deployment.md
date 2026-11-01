@@ -243,7 +243,7 @@ A database migrated by a newer version cannot be opened by an older one. Rollbac
 
 ### Agent presets
 
-The worker and router presets move shell commands to the background after 5 seconds. A Session cannot load without its preset. Keep the `dsh-superagent-worker` and `dsh-superagent-router` rows in `cordis.patch.yml` while their Sessions are in use; otherwise resume fails with `agent-preset/not-found`.
+The worker and router presets move shell commands to the background after 5 seconds. A Session cannot load without its preset. Keep the `dsh-superagent-worker` and `dsh-superagent-router` rows in `cordis.patch.yml` while their Sessions are in use; otherwise resume fails with `agent-preset/not-found`. Assessor subagents run under `dsh-superagent-assessor`, which holds only the time context, and need DeepSeek Harness's subagent service with its `spawn` provider, which the base bundle mounts.
 
 ## Troubleshooting
 

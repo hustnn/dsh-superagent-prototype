@@ -7,6 +7,7 @@ import { UserError, followupOwners, key, reasonText, type Decision, type Decisio
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
 import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
 import { ticketCard } from '../cards.ts'
+import { proactiveNotice } from '../notices.ts'
 import { PromptConfigSchema, savePrompts, type Prompts } from '../prompts.ts'
 import { readResource, type MainResourceHost, type ResourceHost } from '../resources.ts'
 import type { Sessions } from '../sessions.ts'
@@ -192,6 +193,41 @@ function recallTool(host: MainToolsHost): Tool {
     },
   })
 }
+/**
+ * The eval tools of a Session that assesses proactive candidates: the main Session's, for any candidate, or an assessor
+ * subagent's, for the one Trigger it assesses (`only`), whose accept the main Session hears of as a notice.
+ */
+function evalTools(host: MainToolsHost, agent: Agent, only?: string): Tool[] {
+  const mine = (triggerId: string) => { if (only !== undefined && triggerId !== only) throw new Error(`You assess trigger ${only} only`) }
+  return [
+    tool({
+      name: 'orchestrator_eval',
+      description: 'Load a proactive candidate\'s window and its thread\'s tickets; repeated calls reuse them.',
+      schema: z.object({ trigger_id: z.string() }).strict(),
+      execute: async (args, signal) => { mine(args.trigger_id); return host.assessor.context(args.trigger_id, signal) },
+    }),
+    tool({
+      name: 'orchestrator_eval_read',
+      description: 'Read more of a candidate\'s context, always with its trigger_id: a message or stub whole by message_id, an image by image_id, the root, the parent, a thread page by cursor, or a file or directory by path.',
+      schema: EvalReadSchema,
+      execute: async (read, signal) => { mine(read.trigger_id); return host.assessor.read(agent, read, signal) },
+    }),
+    tool({
+      name: 'orchestrator_eval_decide',
+      description: 'Record the decision of an assessment, as admission describes it, after orchestrator_eval with the same trigger_id.',
+      schema: z.object({ trigger_id: z.string().min(1), ...AssessmentSchema.shape }).strict(),
+      execute: async ({ trigger_id, ...result }, signal) => {
+        mine(trigger_id)
+        const decided = await host.assessor.decide(trigger_id, AssessmentSchema.parse(result), signal)
+        const ticket = only !== undefined && decided.ticket_id ? host.store.tickets.get(decided.ticket_id) : undefined
+        if (ticket) host.sessions.notify(...proactiveNotice(ticket, trigger_id))
+        return routed(host, { decision: decided.state as DecisionKind, reason: decided.reason, ticketId: decided.ticket_id })
+      },
+    }),
+  ]
+}
+/** An assessor subagent's tools: the eval tools for the one Trigger it assesses, `triggerId`. */
+export function assessorTools(host: MainToolsHost, agent: Agent, triggerId: string): Tool[] { return evalTools(host, agent, triggerId) }
 /** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session. */
 export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
   const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings }
@@ -241,27 +277,7 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
         return { queued }
       },
     }),
-    tool({
-      name: 'orchestrator_eval',
-      description: 'Load a proactive candidate\'s window and its thread\'s tickets; repeated calls reuse them.',
-      schema: z.object({ trigger_id: z.string() }).strict(),
-      execute: async (args, signal) => host.assessor.context(args.trigger_id, signal),
-    }),
-    tool({
-      name: 'orchestrator_eval_read',
-      description: 'Read more of a candidate\'s context, always with its trigger_id: a message or stub whole by message_id, an image by image_id, the root, the parent, a thread page by cursor, or a file or directory by path.',
-      schema: EvalReadSchema,
-      execute: async (read, signal) => host.assessor.read(agent, read, signal),
-    }),
-    tool({
-      name: 'orchestrator_eval_decide',
-      description: 'Record the decision of an assessment, as admission describes it, after orchestrator_eval with the same trigger_id.',
-      schema: z.object({ trigger_id: z.string().min(1), ...AssessmentSchema.shape }).strict(),
-      execute: async ({ trigger_id, ...result }, signal) => {
-        const decided = await host.assessor.decide(trigger_id, AssessmentSchema.parse(result), signal)
-        return routed(host, { decision: decided.state as DecisionKind, reason: decided.reason, ticketId: decided.ticket_id })
-      },
-    }),
+    ...evalTools(host, agent),
     tool({
       name: 'orchestrator_reply',
       description: `Send an answer to a human question, a ready result, or attention requiring human action, as the replies section says; the gate refuses anything else, such as progress. purpose=result needs a ticket in person/review after a ready report, a completed or merged one, or a dropped one whose matched rule asks for a closing message. IM limit: ${IM_WORDS} words.`,
